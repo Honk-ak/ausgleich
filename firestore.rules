@@ -3,7 +3,10 @@ rules_version = '2';
 // Grundsätze
 // 1. Eine Aktivität sehen nur ihre Mitglieder (Liste memberUids). Wer bei einer früheren Aktivität
 //    dabei war, hat dadurch keinen Zugriff auf spätere.
-// 2. Neue Mitglieder kommen nur hinzu, wenn alle bisherigen App-Mitglieder zugestimmt haben.
+// 2. Neue Mitglieder: Solange die Gruppe offen ist (joinOpen), ist man mit gültigem Einladungslink sofort dabei.
+//    Ist sie geschlossen, müssen alle bisherigen App-Mitglieder zustimmen.
+// 2b. Austreten: ohne Ausgaben verlässt man die Gruppe selbst; mit Ausgaben gibt es einen Teilausgleich
+//    (Markierung leftAt), die Person behält Lesezugriff. Personen ohne App entfernt der Organisator.
 // 3. Ausgaben: Änderungen ohne Begründung nur bis 12 Stunden nach dem Eintragen und nur vor dem Kassensturz.
 // 4. Zahlungen: „überwiesen“ meldet nur der Zahler, „erhalten“ bestätigt nur der Empfänger.
 //    Ohne Bestätigung abschließen geht nur mit Begründung.
@@ -41,13 +44,24 @@ service cloud.firestore {
         (signedIn() && request.auth.uid in resource.data.memberUids
           && unchanged(['createdBy', 'memberUids', 'token', 'createdAt'])
           && request.resource.data.status in ['open', 'settled', 'done']
-          && (resource.data.createdBy == request.auth.uid || unchanged(['settings', 'title', 'topic'])))
-        // b) Beitritt: sich selbst anhängen, nur mit von allen genehmigter Anfrage
+          && (resource.data.createdBy == request.auth.uid || unchanged(['settings', 'title', 'topic']))
+          // Gruppe öffnen/schließen nur der Organisator; schließen (beim Kassensturz) darf jedes Mitglied
+          && (resource.data.createdBy == request.auth.uid || unchanged(['joinOpen']) || request.resource.data.joinOpen == false))
+        // b) Beitritt: sich selbst anhängen, mit Anfrage über gültigen Einladungslink.
+        //    Offene Gruppe: sofort. Geschlossene Gruppe: nur mit Zustimmung aller.
         || (signedIn() && !(request.auth.uid in resource.data.memberUids)
           && onlyChanged(['memberUids'])
           && request.resource.data.memberUids == resource.data.memberUids.concat([request.auth.uid])
-          && get(/databases/$(database)/documents/activities/$(aid)/requests/$(request.auth.uid)).data.status == 'approved'
-          && get(/databases/$(database)/documents/activities/$(aid)/requests/$(request.auth.uid)).data.approvals.hasAll(resource.data.memberUids));
+          && exists(/databases/$(database)/documents/activities/$(aid)/requests/$(request.auth.uid))
+          && (resource.data.get('joinOpen', false) == true
+            || (get(/databases/$(database)/documents/activities/$(aid)/requests/$(request.auth.uid)).data.status == 'approved'
+              && get(/databases/$(database)/documents/activities/$(aid)/requests/$(request.auth.uid)).data.approvals.hasAll(resource.data.memberUids))))
+        // c) Austreten (ohne Ausgaben): sich selbst entfernen, nur vor dem Kassensturz, nicht der Organisator
+        || (signedIn() && request.auth.uid in resource.data.memberUids
+          && request.auth.uid != resource.data.createdBy
+          && resource.data.status == 'open'
+          && onlyChanged(['memberUids'])
+          && request.resource.data.memberUids == resource.data.memberUids.removeAll([request.auth.uid]));
       allow delete: if false;
 
       // Einladung: lesbar nur mit bekanntem Token, nie auflistbar
@@ -94,27 +108,36 @@ service cloud.firestore {
             && request.resource.data.status == 'rejected'
             && request.resource.data.rejectedBy == request.auth.uid)
         );
-        // Die anfragende Person kann ihre offene Anfrage zurückziehen
-        allow delete: if signedIn() && resource.data.requestedBy == request.auth.uid && resource.data.status != 'approved';
+        // Die anfragende Person kann ihre Anfrage zurückziehen bzw. nach dem Beitritt aufräumen
+        allow delete: if signedIn() && resource.data.requestedBy == request.auth.uid;
       }
 
       match /members/{memberId} {
         allow read: if isMember();
         allow create: if isMember()
           && shortText(request.resource.data.name, 1, 30)
+          && request.resource.data.get('leftAt', null) == null
           && (
-            // sich selbst eintragen (nach genehmigtem Beitritt oder als Organisator beim Anlegen)
-            (memberId == request.auth.uid && request.resource.data.uid == request.auth.uid)
-            // Name ohne App: solange nur eine Person die App nutzt, oder mit genehmigter Anfrage
+            // sich selbst eintragen (nach dem Beitritt oder als Organisator beim Anlegen)
+            request.resource.data.uid == request.auth.uid
+            // Name ohne App: solange nur eine Person die App nutzt, die Gruppe offen ist, oder mit genehmigter Anfrage
             || (request.resource.data.uid == null
               && (activity().memberUids.size() == 1
+                || activity().get('joinOpen', false) == true
                 || get(/databases/$(database)/documents/activities/$(aid)/requests/$(memberId)).data.status == 'approved'))
           );
-        // einen freien Namen übernehmen: nur für sich selbst und nur, wenn er noch frei ist
-        allow update: if isMember()
-          && onlyChanged(['uid'])
-          && resource.data.uid == null
-          && request.resource.data.uid == request.auth.uid;
+        allow update: if isMember() && resource.data.get('leftAt', null) == null && (
+          // einen freien Namen übernehmen: nur für sich selbst und nur, wenn er noch frei ist
+          (onlyChanged(['uid'])
+            && resource.data.uid == null
+            && request.resource.data.uid == request.auth.uid)
+          // ausscheiden: sich selbst, oder der Organisator eine Person ohne App; nur vor dem Kassensturz
+          || (onlyChanged(['leftAt', 'leftBy'])
+            && request.resource.data.leftAt is int
+            && request.resource.data.leftBy == request.auth.uid
+            && activity().status == 'open'
+            && (resource.data.uid == request.auth.uid || (resource.data.uid == null && isOwner())))
+        );
         allow delete: if false;
       }
 

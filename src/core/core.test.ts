@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ExpenseInput, settle, splitShares } from './settle';
+import { ExpenseInput, exitPlan, settle, splitShares } from './settle';
 import { cleanPaypalHandle, epcPayload, isValidIban, parseAmount, paypalMeLink } from './pay';
 
 const all = (ids: string[]) => ids.map((memberId) => ({ memberId, weight: 1 }));
@@ -116,6 +116,36 @@ describe('Nachausgleich', () => {
     const first = settle('samstag', people, saturday, s);
     const again = settle('samstag', people, saturday, s, first.payments);
     expect(again.payments).toHaveLength(0);
+  });
+});
+
+describe('Vorzeitig gehen (Teilausgleich)', () => {
+  const s = { mode: 'relaxed' as const, roundingStepCents: 100, toleranceCents: 200 };
+  it('Peter geht: eine Zahlung an Anna, gerundet', () => {
+    expect(exitPlan('peter', people, saturday, s)).toEqual([{ from: 'peter', to: 'anna', amountCents: 2600, exactCents: 2600 }]);
+  });
+  it('wer ungefähr ausgeglichen ist, geht ohne Zahlung', () => {
+    expect(exitPlan('lisa', people, saturday, s)).toEqual([]);
+  });
+  it('wer vorn liegt, bekommt Geld von den anderen', () => {
+    const plan = exitPlan('anna', people, saturday, s);
+    expect(plan.every((p) => p.to === 'anna')).toBe(true);
+    expect([4000, 4100]).toContain(plan.reduce((x, p) => x + p.amountCents, 0));
+    expect(plan[0].from).toBe('peter');
+  });
+  it('danach rechnen die anderen weiter, Peter taucht nicht mehr auf', () => {
+    const exit = exitPlan('peter', people, saturday, s);
+    const later: ExpenseInput[] = [
+      ...saturday,
+      { id: '0', amountCents: 3000, payerId: 'tom', participants: all(['anna', 'lisa', 'tom']), isTreat: false },
+      { id: '9', amountCents: 999, payerId: 'lisa', participants: all(['anna', 'lisa', 'tom']), isTreat: false },
+    ];
+    const r = settle('samstag', people, later, s, exit, ['peter']);
+    expect(r.payments.some((p) => p.from === 'peter' || p.to === 'peter')).toBe(false);
+    // Kontrolle centgenau: nach Teilausgleich und Kassensturz bleibt niemand weit weg von null
+    const exact = settle('samstag', people, later, { mode: 'exact', roundingStepCents: 1, toleranceCents: 0 }, exit, ['peter']);
+    expect(exact.payments.some((p) => p.from === 'peter' || p.to === 'peter')).toBe(false);
+    for (const v of Object.values(exact.advantage)) expect(Math.abs(v)).toBeLessThanOrEqual(100);
   });
 });
 

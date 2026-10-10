@@ -25,6 +25,8 @@ export interface Activity {
   settings: Settings;
   token: string;
   memberUids: string[];
+  /** „Tür offen“: Wer den QR-Code scannt, ist ohne Zustimmung sofort dabei. */
+  joinOpen?: boolean;
 }
 export interface Member {
   id: string;
@@ -33,6 +35,9 @@ export interface Member {
   color: number;
   role: 'organizer' | 'member';
   createdAt: number;
+  /** ausgeschieden seit (vorzeitig gegangen oder entfernt) */
+  leftAt?: number | null;
+  leftBy?: string | null;
 }
 export interface Expense {
   id: string;
@@ -83,6 +88,8 @@ export interface Payment {
   createdAt: number;
   /** bis wann gezahlt bzw. bestätigt sein soll */
   dueAt: number;
+  /** 'exit': Teilausgleich, weil jemand vorzeitig gegangen ist */
+  kind?: 'exit';
 }
 export interface SettlementMeta {
   confirmedAt: number;
@@ -139,4 +146,19 @@ export interface ActivityData {
   payments: Payment[];
   requests: JoinRequest[];
   pendingWrites: boolean;
+}
+
+/** Noch dabei (nicht ausgeschieden) */
+export const isActive = (m: Member) => !m.leftAt;
+
+/** Kommt die Person in einer Ausgabe vor (auch gelöschte)? Dann geht Austreten nur mit Teilausgleich. */
+export function isInvolved(memberId: string, expenses: Expense[]): boolean {
+  return expenses.some((e) => e.payerId === memberId || e.participants.some((p) => p.memberId === memberId && p.weight > 0));
+}
+
+/** Zahlungen, die vor der Berechnung verrechnet werden: Teilausgleiche immer, sonst nur gemeldete/erledigte. */
+export function countedTransfers(payments: Payment[], afterSettlement: boolean) {
+  return payments
+    .filter((p) => p.kind === 'exit' || (afterSettlement && p.status !== 'open'))
+    .map((p) => ({ from: p.from, to: p.to, amountCents: p.amountCents }));
 }

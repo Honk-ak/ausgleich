@@ -2,10 +2,13 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, onAuthStateChanged, signInAnonymously } from 'firebase/auth';
 import {
+  arrayRemove,
   arrayUnion,
   collection,
+  deleteDoc,
   doc,
   getDoc,
+  getDocs,
   initializeFirestore,
   onSnapshot,
   persistentLocalCache,
@@ -107,7 +110,7 @@ export function useSignals(uid: string | null, aids: string[]): Record<string, T
       stops.push(
         onSnapshot(sub(aid, 'members'), (snap) => {
           const members = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as T.Member);
-          patch({ members, myMemberId: members.find((m) => m.uid === uid)?.id ?? null });
+          patch({ members, myMemberId: (members.find((m) => m.uid === uid && !m.leftAt) ?? members.find((m) => m.uid === uid))?.id ?? null });
         }, ignore),
         onSnapshot(sub(aid, 'payments'), (snap) => patch({ payments: snap.docs.map((d) => ({ id: d.id, ...d.data() }) as T.Payment) }), ignore),
         onSnapshot(query(sub(aid, 'requests'), where('status', '==', 'pending')), (snap) =>
@@ -207,6 +210,7 @@ export async function createActivity(
     settings: input.settings,
     token,
     memberUids: [uid],
+    joinOpen: true,
   });
   await setDoc(subDoc(aid, 'invites', token), { title: input.title, createdAt: now });
   await setDoc(subDoc(aid, 'members', uid), { name: input.myName, uid, color: 0, role: 'organizer', createdAt: now });
@@ -298,13 +302,68 @@ export async function completeJoin(uid: string, aid: string) {
   await updateDoc(ref, { memberUids: arrayUnion(uid) });
 }
 
+/**
+ * Beitreten über den QR-Code. Ist die Tür offen, ist man sofort dabei (true).
+ * Ist die Gruppe geschlossen, bleibt die Anfrage stehen und alle müssen zustimmen (false).
+ */
+export async function joinNow(uid: string, aid: string, token: string, name: string, title: string): Promise<boolean> {
+  await requestJoin(uid, aid, token, name, title);
+  try {
+    await completeJoin(uid, aid);
+  } catch {
+    return false;
+  }
+  await enterAs(aid, uid, name);
+  // Die Anfrage wird nicht mehr gebraucht, sonst sähen die anderen sie als offen
+  await deleteDoc(subDoc(aid, 'requests', uid)).catch(() => undefined);
+  return true;
+}
+
+/** Nach dem Beitritt: steht der Name schon frei in der Liste (ohne App), übernehmen; sonst neu eintragen. */
+export async function enterAs(aid: string, uid: string, name: string) {
+  const snap = await getDocs(sub(aid, 'members'));
+  const members = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as T.Member);
+  if (members.some((m) => m.uid === uid && !m.leftAt)) return;
+  const key = name.trim().toLocaleLowerCase('de');
+  const free = members.find((m) => !m.uid && !m.leftAt && m.name.trim().toLocaleLowerCase('de') === key);
+  if (free) return claimMember(aid, free.id, uid);
+  addSelf(aid, uid, name, members.length);
+}
+
+/** Organisator: Tür öffnen oder schließen. */
+export function setJoinOpen(aid: string, open: boolean) {
+  later(updateDoc(act(aid), { joinOpen: open }));
+}
+
+/** „Ich bin raus“ ohne Ausgaben: verschwindet aus der Gruppe und verliert den Zugriff. */
+export async function leaveGroup(aid: string, uid: string, memberId: string) {
+  await deleteDoc(subDoc(aid, 'requests', uid)).catch(() => undefined);
+  // Erst als ausgeschieden markieren (dafür muss man noch Mitglied sein), dann aus der Liste nehmen
+  await updateDoc(subDoc(aid, 'members', memberId), { leftAt: Date.now(), leftBy: uid });
+  await updateDoc(act(aid), { memberUids: arrayRemove(uid) });
+  forgetActivity(uid, aid);
+}
+
+/** Organisator: eine Person ohne App entfernen, die in keiner Ausgabe vorkommt. */
+export function removeMember(aid: string, memberId: string, uid: string) {
+  later(updateDoc(subDoc(aid, 'members', memberId), { leftAt: Date.now(), leftBy: uid }));
+}
+
+/** Vorzeitig gehen mit Teilausgleich: Person scheidet aus, ihre Zahlungen werden angelegt. */
+export function leaveWithSettlement(aid: string, uid: string, memberId: string, plan: SettlementOut['payments'], reminderDays: number) {
+  const batch = writeBatch(db);
+  batch.update(subDoc(aid, 'members', memberId), { leftAt: Date.now(), leftBy: uid });
+  for (const p of plan) batch.set(subDoc(aid, 'payments', newId()), { ...paymentDoc(p, 0, reminderDays), kind: 'exit' });
+  later(batch.commit());
+}
+
 function addMemberDoc(aid: string, id: string, name: string, uid: string | null, color: number) {
   later(setDoc(subDoc(aid, 'members', id), { name, uid, color: color % 8, role: 'member', createdAt: Date.now() }));
 }
 
 /** Eine Person ohne eigene App hinzufügen. Ab zwei App-Nutzern müssen alle zustimmen. */
-export function requestName(aid: string, uid: string, name: string, memberUids: string[], count: number) {
-  if (memberUids.length <= 1) return addMemberDoc(aid, newId(), name, null, count);
+export function requestName(aid: string, uid: string, name: string, memberUids: string[], count: number, joinOpen = false) {
+  if (memberUids.length <= 1 || joinOpen) return addMemberDoc(aid, newId(), name, null, count);
   const id = newId();
   const approved = memberUids.every((u) => u === uid);
   later(
@@ -339,7 +398,7 @@ export function claimMember(aid: string, memberId: string, uid: string) {
   later(updateDoc(subDoc(aid, 'members', memberId), { uid }));
 }
 export function addSelf(aid: string, uid: string, name: string, count: number) {
-  addMemberDoc(aid, uid, name, uid, count);
+  addMemberDoc(aid, newId(), name, uid, count);
 }
 
 function log(aid: string, entry: Omit<T.HistoryEntry, 'id' | 'at'>) {
@@ -399,7 +458,7 @@ export function setExpenseDeleted(aid: string, expense: T.Expense, deleted: bool
   log(aid, { expenseId: expense.id, action: deleted ? 'delete' : 'restore', byName, summary, reason });
 }
 
-export function updateActivity(aid: string, patch: Partial<Pick<T.Activity, 'settings' | 'topic' | 'status'>>) {
+export function updateActivity(aid: string, patch: Partial<Pick<T.Activity, 'settings' | 'topic' | 'status' | 'joinOpen'>>) {
   later(updateDoc(act(aid), patch));
 }
 
@@ -456,7 +515,7 @@ export function confirmSettlement(aid: string, uid: string, result: SettlementOu
   const batch = writeBatch(db);
   batch.set(subDoc(aid, 'settlements', 'current'), metaDoc(uid, result, 1, reminderDays, Date.now()));
   for (const p of result.payments) batch.set(subDoc(aid, 'payments', newId()), paymentDoc(p, 1, reminderDays));
-  batch.update(act(aid), { status: result.payments.length ? 'settled' : 'done' });
+  batch.update(act(aid), { status: result.payments.length ? 'settled' : 'done', joinOpen: false });
   later(batch.commit());
 }
 
@@ -464,7 +523,7 @@ export function confirmSettlement(aid: string, uid: string, result: SettlementOu
 export function recalcSettlement(aid: string, uid: string, meta: T.SettlementMeta, payments: T.Payment[], result: SettlementOut, reminderDays: number) {
   const round = meta.round + 1;
   const batch = writeBatch(db);
-  for (const p of payments) if (p.status === 'open') batch.delete(subDoc(aid, 'payments', p.id));
+  for (const p of payments) if (p.status === 'open' && p.kind !== 'exit') batch.delete(subDoc(aid, 'payments', p.id));
   for (const p of result.payments) batch.set(subDoc(aid, 'payments', newId()), paymentDoc(p, round, reminderDays));
   batch.set(subDoc(aid, 'settlements', 'current'), metaDoc(uid, result, round, reminderDays, meta.confirmedAt));
   batch.update(act(aid), { status: 'settled' });

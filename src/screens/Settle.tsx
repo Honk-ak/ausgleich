@@ -33,6 +33,8 @@ export function Settle(ctx: Ctx) {
   const view = meta ?? result;
   const busy = !online || data.pendingWrites;
   const rounds = [...new Set(data.payments.map((p) => p.round))];
+  const exits = data.payments.filter((p) => p.kind === 'exit');
+  const roundTitle = (r: number) => (r === 0 ? 'Teilausgleich (vorzeitig gegangen)' : r === 1 ? `Ausgleich vom ${day(meta!.confirmedAt)}` : `Nachausgleich ${r - 1}`);
   const finished = data.payments.length > 0 && data.payments.every((p) => p.status === 'received' || p.status === 'closed');
 
   const Card = ({ p }: { p: Payment }) => (
@@ -66,6 +68,15 @@ export function Settle(ctx: Ctx) {
 
       {!meta ? (
         <>
+          {exits.length > 0 ? (
+            <section>
+              <h3>{roundTitle(0)}</h3>
+              {exits.map((p) => (
+                <Card key={p.id} p={p} />
+              ))}
+              <p className="muted">Schon vereinbart und unten bereits eingerechnet.</p>
+            </section>
+          ) : null}
           {result.payments.length === 0 ? (
             <p className="card center">Ihr seid schon ungefähr ausgeglichen. Es ist nichts zu zahlen.</p>
           ) : (
@@ -115,7 +126,7 @@ export function Settle(ctx: Ctx) {
           {finished && !changed ? <p className="lead">Alles erledigt. Ihr seid wieder ausgeglichen.</p> : null}
           {rounds.map((r) => (
             <section key={r}>
-              <h3>{r === 1 ? `Ausgleich vom ${day(meta.confirmedAt)}` : `Nachausgleich ${r - 1}`}</h3>
+              <h3>{roundTitle(r)}</h3>
               {data.payments
                 .filter((p) => p.round === r)
                 .map((p) => (

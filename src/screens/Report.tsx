@@ -19,6 +19,13 @@ export function Report(ctx: Ctx) {
     treat ? 'übernommen (Einladung)' : ids.length === data.members.length ? 'alle' : ids.map(name).join(', ');
   const s = activity.settings;
   const view = meta ?? result;
+  const involved = (id: string) => all.some((e) => e.payerId === id || e.participants.some((p) => p.memberId === id));
+  const rows = data.members.filter((m) => !m.leftAt || involved(m.id));
+  const left = data.members.filter((m) => m.leftAt).sort((a, b) => a.leftAt! - b.leftAt!);
+  const roundName = (p: (typeof data.payments)[number]) => {
+    if (p.round === 0) return `Teilausgleich (${name(byId[p.from]?.leftAt ? p.from : p.to)} gegangen)`;
+    return p.round === 1 ? 'Ausgleich' : `Nachausgleich ${p.round - 1}`;
+  };
 
   return (
     <main className="report">
@@ -36,7 +43,21 @@ export function Report(ctx: Ctx) {
         Beginn: {dt(activity.startsAt)}
         {meta ? ` · Kassensturz: ${dt(meta.confirmedAt)}` : ' · Kassensturz noch nicht gemacht'}
       </p>
-      <p>Personen: {data.members.map((m) => m.name).join(', ')}</p>
+      <p>Personen: {data.members.filter((m) => !m.leftAt).map((m) => m.name).join(', ')}</p>
+      {left.map((m) => (
+        <p key={m.id}>
+          {dt(m.leftAt!)} – {m.name} ausgeschieden
+          {data.payments.some((p) => p.kind === 'exit' && (p.from === m.id || p.to === m.id))
+            ? '. Teilausgleich: ' +
+              data.payments
+                .filter((p) => p.kind === 'exit' && (p.from === m.id || p.to === m.id))
+                .map((p) => `${name(p.from)} → ${name(p.to)} ${euro(p.amountCents, true)}`)
+                .join(', ')
+            : involved(m.id)
+              ? ', ungefähr ausgeglichen (keine Zahlung nötig)'
+              : ' (war an keiner Ausgabe beteiligt)'}
+        </p>
+      ))}
       <p>
         Modus: {modeName(s.mode)} · {roundingText(view.stepCents, view.toleranceCents)}
       </p>
@@ -53,7 +74,7 @@ export function Report(ctx: Ctx) {
           </tr>
         </thead>
         <tbody>
-          {data.members.map((m) => {
+          {rows.map((m) => {
             const bal = view.balances[m.id] ?? 0;
             const paid = result.paid[m.id] ?? 0;
             const sh = shared[m.id] ?? 0;
@@ -110,7 +131,7 @@ export function Report(ctx: Ctx) {
       </table>
 
       <h2>Ausgleichszahlungen</h2>
-      {meta ? (
+      {meta || data.payments.length ? (
         data.payments.length ? (
           <table>
             <thead>
@@ -124,7 +145,7 @@ export function Report(ctx: Ctx) {
             <tbody>
               {data.payments.map((p) => (
                 <tr key={p.id}>
-                  <td>{p.round === 1 ? 'Ausgleich' : `Nachausgleich ${p.round - 1}`}</td>
+                  <td>{roundName(p)}</td>
                   <td>
                     {name(p.from)} → {name(p.to)}
                   </td>
@@ -141,9 +162,10 @@ export function Report(ctx: Ctx) {
         ) : (
           <p>Keine Zahlungen nötig.</p>
         )
-      ) : (
+      ) : null}
+      {!meta ? (
         <>
-          <p>Vorschau (noch nicht bestätigt):</p>
+          <p>Vorschau Kassensturz (noch nicht bestätigt):</p>
           <ul>
             {result.payments.map((p, i) => (
               <li key={i}>
@@ -152,11 +174,11 @@ export function Report(ctx: Ctx) {
             ))}
           </ul>
         </>
-      )}
+      ) : null}
 
       <h2>Rundung</h2>
       <ul>
-        {data.members.map((m) => {
+        {rows.map((m) => {
           const adv = (meta ?? result).advantage[m.id] ?? 0;
           return (
             <li key={m.id}>

@@ -43,7 +43,7 @@ export function useSignals(_uid: string | null, aids: string[]): Record<string, 
     aids.filter((a) => rooms[a]).map((a) => [
       a,
       {
-        myMemberId: rooms[a].members.find((m) => m.uid === ME)?.id ?? null,
+        myMemberId: (rooms[a].members.find((m) => m.uid === ME && !m.leftAt) ?? rooms[a].members.find((m) => m.uid === ME))?.id ?? null,
         members: rooms[a].members,
         payments: rooms[a].payments,
         requests: rooms[a].requests.filter((r) => r.status === 'pending'),
@@ -77,7 +77,7 @@ export async function createActivity(
   const aid = newId();
   const now = Date.now();
   rooms[aid] = {
-    activity: { id: aid, title: input.title, topic: input.topic, createdBy: uid, createdAt: now, startsAt: now, endsAt: input.endsAt, duration: input.duration, status: 'open', settings: input.settings, token: 'demo', memberUids: [uid] },
+    activity: { id: aid, title: input.title, topic: input.topic, createdBy: uid, createdAt: now, startsAt: now, endsAt: input.endsAt, duration: input.duration, status: 'open', settings: input.settings, token: 'demo', memberUids: [uid], joinOpen: true },
     members: [input.myName, ...input.others].map((name, i) => ({ id: i === 0 ? uid : newId(), name, uid: i === 0 ? uid : null, color: i % 8, role: i === 0 ? 'organizer' : 'member', createdAt: now + i })),
     expenses: [], history: [], payees: {}, settlement: null, payments: [], requests: [],
   };
@@ -97,6 +97,29 @@ export async function isMemberOf() { return true; }
 export function useMyRequest(): T.JoinRequest | null | undefined { return null; }
 export async function requestJoin() {}
 export async function completeJoin() {}
+export async function joinNow() { return true; }
+export async function enterAs() {}
+export function setJoinOpen(aid: string, open: boolean) {
+  rooms[aid].activity = { ...rooms[aid].activity, joinOpen: open };
+  emit();
+}
+const markLeft = (aid: string, memberId: string) => {
+  rooms[aid].members = rooms[aid].members.map((m) => (m.id === memberId ? { ...m, leftAt: Date.now(), leftBy: ME } : m));
+};
+export async function leaveGroup(aid: string, uid: string, memberId: string) {
+  markLeft(aid, memberId);
+  rooms[aid].activity = { ...rooms[aid].activity, memberUids: rooms[aid].activity.memberUids.filter((u) => u !== uid) };
+  emit();
+}
+export function removeMember(aid: string, memberId: string) {
+  markLeft(aid, memberId);
+  emit();
+}
+export function leaveWithSettlement(aid: string, _uid: string, memberId: string, plan: SettlementOut['payments'], days: number) {
+  markLeft(aid, memberId);
+  rooms[aid].payments = [...rooms[aid].payments, ...plan.map((p) => ({ ...paymentDoc(p, 0, days), kind: 'exit' as const }))];
+  emit();
+}
 export function requestName(aid: string, _uid: string, name: string, _memberUids: string[], count: number) {
   rooms[aid].members.push({ id: newId(), name, uid: null, color: count % 8, role: 'member', createdAt: Date.now() });
   emit();
@@ -108,7 +131,7 @@ export function claimMember(aid: string, memberId: string, uid: string) {
   emit();
 }
 export function addSelf(aid: string, uid: string, name: string, count: number) {
-  rooms[aid].members.push({ id: uid, name, uid, color: count % 8, role: 'member', createdAt: Date.now() });
+  rooms[aid].members.push({ id: newId(), name, uid, color: count % 8, role: 'member', createdAt: Date.now() });
   emit();
 }
 /** Nur im Demo-Modus: so tun, als wäre man eine andere Person der Aktivität. */
@@ -141,7 +164,7 @@ export function setExpenseDeleted(aid: string, expense: T.Expense, deleted: bool
   log(aid, { expenseId: expense.id, action: deleted ? 'delete' : 'restore', byName, summary, reason });
   emit();
 }
-export function updateActivity(aid: string, patch: Partial<Pick<T.Activity, 'settings' | 'topic' | 'status'>>) {
+export function updateActivity(aid: string, patch: Partial<Pick<T.Activity, 'settings' | 'topic' | 'status' | 'joinOpen'>>) {
   rooms[aid].activity = { ...rooms[aid].activity, ...patch };
   emit();
 }
@@ -160,12 +183,12 @@ export function confirmSettlement(aid: string, uid: string, result: SettlementOu
   const r = rooms[aid];
   r.settlement = meta(uid, result, 1, days, Date.now());
   r.payments = result.payments.map((p) => paymentDoc(p, 1, days));
-  r.activity = { ...r.activity, status: result.payments.length ? 'settled' : 'done' };
+  r.activity = { ...r.activity, status: result.payments.length ? 'settled' : 'done', joinOpen: false };
   emit();
 }
 export function recalcSettlement(aid: string, uid: string, m: T.SettlementMeta, payments: T.Payment[], result: SettlementOut, days: number) {
   const r = rooms[aid];
-  r.payments = [...payments.filter((p) => p.status !== 'open'), ...result.payments.map((p) => paymentDoc(p, m.round + 1, days))];
+  r.payments = [...payments.filter((p) => p.status !== 'open' || p.kind === 'exit'), ...result.payments.map((p) => paymentDoc(p, m.round + 1, days))];
   r.settlement = meta(uid, result, m.round + 1, days, m.confirmedAt);
   r.activity = { ...r.activity, status: 'settled' };
   emit();

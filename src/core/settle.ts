@@ -155,6 +155,8 @@ export function settle(
   settings: SettingsInput,
   /** bereits geleistete Zahlungen (Nachausgleich): werden vor der Berechnung verrechnet */
   transfers: { from: string; to: string; amountCents: number }[] = [],
+  /** ausgeschiedene Personen mit Teilausgleich: ihr Restsaldo (Rundungscent) geht auf die Übrigen */
+  frozen: string[] = [],
 ): SettlementOut {
   const seed = hash(activityId);
   const ids = [...memberIds].sort();
@@ -192,7 +194,8 @@ export function settle(
   const { stepCents, toleranceCents } = resolveRounding(settings, sharedCents, ids.length);
 
   // 3: Kleinigkeiten weglassen, den offenen Rest gleichmäßig auf die Übrigen verteilen
-  const small = ids.filter((id) => balance[id] !== 0 && Math.abs(balance[id]) < toleranceCents);
+  const isFrozen = new Set(frozen);
+  const small = ids.filter((id) => balance[id] !== 0 && (Math.abs(balance[id]) < toleranceCents || isFrozen.has(id)));
   let rest = 0;
   for (const id of small) {
     rest += balance[id];
@@ -261,4 +264,47 @@ export function settle(
   ).toString(16);
 
   return { totalCents, sharedCents, paid, balances: exact, payments, advantage, stepCents, toleranceCents, inputHash };
+}
+
+/**
+ * Teilausgleich für eine Person, die vorzeitig geht: Nur sie zahlt oder bekommt.
+ * Gegenüber sind die Personen mit dem größten entgegengesetzten Saldo, damit es möglichst eine Zahlung bleibt.
+ */
+export function exitPlan(
+  leaverId: string,
+  memberIds: string[],
+  expenses: ExpenseInput[],
+  settings: SettingsInput,
+  transfers: { from: string; to: string; amountCents: number }[] = [],
+): PaymentOut[] {
+  const r = settle('exit', memberIds, expenses, settings);
+  const bal: Record<string, number> = { ...r.balances };
+  for (const t of transfers) {
+    if (!(t.from in bal) || !(t.to in bal)) continue;
+    bal[t.from] += t.amountCents;
+    bal[t.to] -= t.amountCents;
+  }
+  const own = bal[leaverId] ?? 0;
+  if (own === 0 || Math.abs(own) < r.toleranceCents) return [];
+  const step = r.stepCents;
+  const total = roundTo(Math.abs(own), step, (hash(`exit|${leaverId}`) & 1) === 1);
+  if (total <= 0) return [];
+  const sign = Math.sign(own); // +1: bekommt Geld, -1: zahlt
+  // Gegenüber: entgegengesetzter Saldo, größter zuerst, bei Gleichstand fest nach Kennung
+  const others = Object.keys(bal)
+    .filter((id) => id !== leaverId && Math.sign(bal[id]) === -sign)
+    .sort((a, b) => Math.abs(bal[b]) - Math.abs(bal[a]) || (a < b ? -1 : 1));
+  if (others.length === 0) return [];
+  const out: PaymentOut[] = [];
+  let left = total;
+  others.forEach((id, i) => {
+    if (left <= 0) return;
+    const last = i === others.length - 1;
+    let chunk = last ? left : Math.min(left, Math.floor(Math.abs(bal[id]) / step) * step);
+    if (!last && left - chunk < step) chunk = left; // keinen Mini-Rest übrig lassen
+    if (chunk <= 0) return;
+    left -= chunk;
+    out.push(sign < 0 ? { from: leaverId, to: id, amountCents: chunk, exactCents: chunk } : { from: id, to: leaverId, amountCents: chunk, exactCents: chunk });
+  });
+  return out;
 }

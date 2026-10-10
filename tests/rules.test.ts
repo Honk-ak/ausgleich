@@ -1,6 +1,6 @@
 // Prüft die Zugriffsregeln gegen den Firestore-Emulator: npm run test:rules (braucht Java)
 import { assertFails, assertSucceeds, initializeTestEnvironment, RulesTestEnvironment } from '@firebase/rules-unit-testing';
-import { arrayUnion, collection, deleteDoc, doc, getDoc, getDocs, setDoc, updateDoc } from 'firebase/firestore';
+import { arrayRemove, arrayUnion, collection, deleteDoc, doc, getDoc, getDocs, setDoc, updateDoc } from 'firebase/firestore';
 import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, it } from 'vitest';
 
@@ -90,6 +90,53 @@ describe('Beitritt mit Zustimmung aller', () => {
   it('freie Namen nur für sich selbst übernehmen, vergebene gar nicht', async () => {
     await assertFails(updateDoc(d('tom', 'members', 'm-peter'), { uid: 'someone-else' }));
     await assertFails(updateDoc(d('tom', 'members', 'anna'), { uid: 'tom' }));
+  });
+});
+
+describe('Offene Gruppe („Tür offen“)', () => {
+  const req = (uid: string) => ({ kind: 'join', uid, name: uid, token: TOKEN, at: now, approvals: [], status: 'pending', rejectedBy: null, requestedBy: uid });
+  it('nur der Organisator öffnet die Gruppe', async () => {
+    await assertFails(updateDoc(doc(db('tom'), 'activities', A), { joinOpen: true }));
+    await assertSucceeds(updateDoc(doc(db('anna'), 'activities', A), { joinOpen: true }));
+  });
+  it('mit gültigem Link ist man sofort dabei, ohne Link nicht', async () => {
+    await assertFails(updateDoc(doc(db('olga'), 'activities', A), { memberUids: arrayUnion('olga') }));
+    await assertSucceeds(setDoc(d('olga', 'requests', 'olga'), req('olga')));
+    await assertSucceeds(updateDoc(doc(db('olga'), 'activities', A), { memberUids: arrayUnion('olga') }));
+    await assertSucceeds(setDoc(d('olga', 'members', 'm-olga'), { name: 'Olga', uid: 'olga', color: 2, role: 'member', createdAt: now }));
+    await assertSucceeds(deleteDoc(d('olga', 'requests', 'olga')));
+    // für andere eintragen geht nicht
+    await assertFails(setDoc(d('olga', 'members', 'm-fake'), { name: 'Fake', uid: 'tom', color: 2, role: 'member', createdAt: now }));
+  });
+  it('schließen darf jedes Mitglied, danach braucht es wieder alle Stimmen', async () => {
+    await assertSucceeds(updateDoc(doc(db('tom'), 'activities', A), { joinOpen: false }));
+    await assertSucceeds(setDoc(d('paul', 'requests', 'paul'), req('paul')));
+    await assertFails(updateDoc(doc(db('paul'), 'activities', A), { memberUids: arrayUnion('paul') }));
+  });
+});
+
+describe('Austreten', () => {
+  it('ohne Ausgaben verlässt man die Gruppe selbst und sieht danach nichts mehr', async () => {
+    await assertSucceeds(updateDoc(d('olga', 'members', 'm-olga'), { leftAt: now, leftBy: 'olga' }));
+    await assertSucceeds(updateDoc(doc(db('olga'), 'activities', A), { memberUids: arrayRemove('olga') }));
+    await assertFails(getDocs(collection(db('olga'), 'activities', A, 'expenses')));
+  });
+  it('der Organisator kann nicht austreten, andere nicht hinauswerfen', async () => {
+    await assertFails(updateDoc(doc(db('anna'), 'activities', A), { memberUids: arrayRemove('anna') }));
+    await assertFails(updateDoc(doc(db('anna'), 'activities', A), { memberUids: arrayRemove('tom') }));
+    await assertFails(updateDoc(d('anna', 'members', 'tom'), { leftAt: now, leftBy: 'anna' }));
+  });
+  it('Personen ohne App entfernt nur der Organisator', async () => {
+    await assertSucceeds(setDoc(d('anna', 'members', 'm-oma'), { name: 'Oma', uid: null, color: 3, role: 'member', createdAt: now }));
+    await assertFails(updateDoc(d('tom', 'members', 'm-oma'), { leftAt: now, leftBy: 'tom' }));
+    await assertSucceeds(updateDoc(d('anna', 'members', 'm-oma'), { leftAt: now, leftBy: 'anna' }));
+    // einmal ausgeschieden bleibt ausgeschieden
+    await assertFails(updateDoc(d('anna', 'members', 'm-oma'), { leftAt: null, leftBy: 'anna' }));
+  });
+  it('vorzeitig gehen mit Ausgaben: Markierung und Teilausgleich, Lesezugriff bleibt', async () => {
+    await assertSucceeds(updateDoc(d('tom', 'members', 'tom'), { leftAt: now, leftBy: 'tom' }));
+    await assertSucceeds(setDoc(d('tom', 'payments', 'x1'), { kind: 'exit', round: 0, from: 'tom', to: 'anna', amountCents: 500, exactCents: 500, status: 'open', createdAt: now }));
+    await assertSucceeds(getDocs(collection(db('tom'), 'activities', A, 'expenses')));
   });
 });
 

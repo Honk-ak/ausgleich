@@ -207,3 +207,9 @@ h3.section { margin-top: 6px; }
 @keyframes bd-b { from { transform: translateX(60px); } to { transform: none; } }
 @keyframes pop { from { opacity: 0; transform: scale(.97) translateY(8px); } to { opacity: 1; transform: none; } }
 @media print { .backdrop { display: none; } }
+
+/* Runde 4: offene Tür, Austreten */
+.gone-note { color: var(--muted); }
+.card.invite { text-align: center; }
+.card.invite h3 { margin-top: 0; }
+.link.center-link { display: block; width: 100%; }

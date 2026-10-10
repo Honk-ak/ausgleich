@@ -3,10 +3,11 @@ import { markSeen, Reminder, remindersFor, shouldPopup, unseen } from '../remind
 import {
   completeJoin,
   createActivity,
+  enterAs,
   isMemberOf,
+  joinNow,
   MyActivity,
   readInvite,
-  requestJoin,
   Settings,
   useMyActivities,
   useMyRequest,
@@ -229,8 +230,6 @@ export function Wizard({ uid }: { uid: string }) {
   const online = useOnline();
   const [step, setStep] = useState(0);
   const [myName, setMyName] = useState(localStorage.getItem('fair.name') ?? '');
-  const [others, setOthers] = useState<string[]>([]);
-  const [draft, setDraft] = useState('');
   const [duration, setDuration] = useState('today');
   const [mode, setMode] = useState<Settings['mode']>('relaxed');
   const [rounding, setRounding] = useState<number | null>(null);
@@ -241,11 +240,6 @@ export function Wizard({ uid }: { uid: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
-  const addOther = () => {
-    const name = draft.trim().slice(0, 30);
-    if (name && !others.includes(name) && name !== myName.trim()) setOthers([...others, name]);
-    setDraft('');
-  };
   const pickMode = (m: Settings['mode']) => {
     setMode(m);
     if (m === 'exact') {
@@ -261,8 +255,7 @@ export function Wizard({ uid }: { uid: string }) {
     const next = methods.filter((m) => m !== 'later');
     setMethods(next.includes(id) ? next.filter((m) => m !== id) : [...next, id]);
   };
-  const people = 1 + others.length + (draft.trim() ? 1 : 0);
-  const canNext = step !== 0 || (myName.trim().length > 0 && people >= 2);
+  const canNext = step !== 0 || myName.trim().length > 0;
 
   const finish = async () => {
     setBusy(true);
@@ -273,12 +266,12 @@ export function Wizard({ uid }: { uid: string }) {
         title: title.trim().slice(0, 60) || 'Unsere Kasse',
         topic: topic.trim().slice(0, 60),
         myName: myName.trim().slice(0, 30),
-        others,
+        others: [],
         duration,
         endsAt: Date.now() + days * 86400000,
         settings: { mode, roundingStepCents: rounding, toleranceCents: tolerance, paymentMethods: methods, reminderDays: 3 },
       });
-      go(`/a/${aid}/info`);
+      go(`/a/${aid}`);
     } catch (e) {
       setError('Das hat nicht geklappt. Bitte prüfe deine Internetverbindung und versuche es noch einmal.');
       console.error(e);
@@ -288,35 +281,20 @@ export function Wizard({ uid }: { uid: string }) {
 
   const steps = [
     <section key="who">
-      <h2>Wer ist dabei?</h2>
+      <h2>Los geht's</h2>
       <label className="field">
         <span>Dein Name</span>
-        <input value={myName} onChange={(e) => setMyName(e.target.value)} maxLength={30} autoComplete="given-name" />
+        <input value={myName} onChange={(e) => setMyName(e.target.value)} maxLength={30} autoComplete="given-name" autoFocus />
       </label>
       <label className="field">
-        <span>Weitere Personen</span>
-        <div className="inline">
-          <input
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && addOther()}
-            placeholder="Name"
-            maxLength={30}
-            enterKeyHint="done"
-          />
-          <button type="button" className="btn" onClick={addOther}>
-            Hinzufügen
-          </button>
-        </div>
+        <span>Name der Aktivität</span>
+        <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={60} />
       </label>
-      <div className="chips">
-        {others.map((n) => (
-          <Chip key={n} on onClick={() => setOthers(others.filter((o) => o !== n))}>
-            {n} ✕
-          </Chip>
-        ))}
-      </div>
-      <p className="muted">Die anderen brauchen kein Konto. Wer die App nutzen möchte, tritt später über den Einladungslink bei.</p>
+      <label className="field">
+        <span>Anlass (optional, hilft beim Wiederfinden)</span>
+        <input value={topic} onChange={(e) => setTopic(e.target.value)} maxLength={60} placeholder="z. B. Schiffsausflug, Birkenkopf" />
+      </label>
+      <p className="muted">Die anderen trägst du nicht ein: Am Ende bekommst du einen QR-Code. Wer ihn scannt, gibt selbst seinen Namen ein und ist dabei.</p>
     </section>,
     <section key="long">
       <h2>Wie lange läuft eure gemeinsame Kasse?</h2>
@@ -394,16 +372,11 @@ export function Wizard({ uid }: { uid: string }) {
     </section>,
     <section key="sum">
       <h2>So rechnen wir</h2>
-      <label className="field">
-        <span>Name der Aktivität</span>
-        <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={60} />
-      </label>
-      <label className="field">
-        <span>Anlass (optional, hilft beim Wiederfinden)</span>
-        <input value={topic} onChange={(e) => setTopic(e.target.value)} maxLength={60} placeholder="z. B. Schiffsausflug, Birkenkopf" />
-      </label>
       <div className="card summary">
-        <p>{1 + others.length} Personen</p>
+        <p>
+          <strong>{title.trim() || 'Unsere Kasse'}</strong>
+        </p>
+        {topic.trim() ? <p>Anlass: {topic.trim()}</p> : null}
         <p>{DURATIONS.find((d) => d.id === duration)?.name}</p>
         <p>Modus: {modeName(mode)}</p>
         <p>{roundingText(rounding, tolerance)}</p>
@@ -433,10 +406,7 @@ export function Wizard({ uid }: { uid: string }) {
           <button
             className="btn primary grow"
             disabled={!canNext}
-            onClick={() => {
-              if (step === 0) addOther();
-              setStep(step + 1);
-            }}
+            onClick={() => setStep(step + 1)}
           >
             Weiter
           </button>
@@ -476,21 +446,32 @@ export function Join({ uid, aid, token }: { uid: string; aid: string; token: str
   useEffect(() => {
     if (request?.status !== 'approved') return;
     completeJoin(uid, aid)
+      .then(() => enterAs(aid, uid, request.name))
       .then(() => go(`/a/${aid}`))
       .catch((e) => {
         console.error(e);
         setError('Die Zustimmung ist da, aber der Beitritt hat noch nicht geklappt. Bitte gleich noch einmal öffnen.');
       });
-  }, [request?.status, uid, aid]);
+  }, [request?.status, uid, aid]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Wurde die Gruppe inzwischen (wieder) geöffnet, klappt der Beitritt ohne Zustimmung
+  useEffect(() => {
+    if (request?.status !== 'pending' || busy) return;
+    completeJoin(uid, aid)
+      .then(() => enterAs(aid, uid, request.name))
+      .then(() => go(`/a/${aid}`))
+      .catch(() => undefined);
+  }, [request?.status, uid, aid]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const send = async () => {
     setBusy(true);
     setError('');
     try {
-      await requestJoin(uid, aid, token, name.trim().slice(0, 30), invite?.title ?? 'Aktivität');
+      const clean = name.trim().slice(0, 30);
+      if (await joinNow(uid, aid, token, clean, invite?.title ?? 'Aktivität')) return go(`/a/${aid}`);
     } catch (e) {
       console.error(e);
-      setError('Die Anfrage hat nicht geklappt. Bitte prüfe die Internetverbindung.');
+      setError('Das hat nicht geklappt. Bitte prüfe die Internetverbindung.');
     }
     setBusy(false);
   };
@@ -502,27 +483,27 @@ export function Join({ uid, aid, token }: { uid: string; aid: string; token: str
       {invite === null ? (
         <p className="card">Dieser Einladungslink ist nicht gültig, oder gerade fehlt das Internet.</p>
       ) : null}
-      {invite && request === null ? (
+      {invite && (request === null || (busy && request?.status === 'pending')) ? (
         <>
           <h2>„{invite.title}“</h2>
-          <p>Damit es fair bleibt, stimmen alle, die schon dabei sind, deinem Beitritt kurz zu.</p>
+          <p>Wie heißt du? Mit diesem Namen sehen dich die anderen.</p>
           <label className="field">
             <span>Dein Name</span>
             <input value={name} onChange={(e) => setName(e.target.value)} maxLength={30} autoComplete="given-name" />
           </label>
           <button className="btn primary wide big" disabled={!name.trim() || busy || !online} onClick={send}>
-            Beitritt anfragen
+            {busy ? 'Einen Moment …' : 'Beitreten'}
           </button>
           <p className="muted">Ausgaben von vor deinem Beitritt werden nur unter den bisherigen Personen aufgeteilt.</p>
         </>
       ) : null}
-      {request?.status === 'pending' ? (
+      {request?.status === 'pending' && !busy ? (
         <div className="card">
           <p>
-            <strong>Anfrage gesendet.</strong>
+            <strong>Die Gruppe ist schon geschlossen.</strong>
           </p>
           <p className="muted">
-            Sobald alle zugestimmt haben, bist du automatisch dabei. Bisher {request.approvals.length === 1 ? 'hat 1 Person' : `haben ${request.approvals.length} Personen`} zugestimmt.
+            Deshalb stimmen die anderen deinem Beitritt kurz zu. Sobald alle zugestimmt haben, bist du automatisch dabei. Bisher {request.approvals.length === 1 ? 'hat 1 Person' : `haben ${request.approvals.length} Personen`} zugestimmt.
           </p>
         </div>
       ) : null}

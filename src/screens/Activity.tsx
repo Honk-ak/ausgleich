@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { euro, parseAmount } from '../core/pay';
-import { settle, SettlementOut } from '../core/settle';
+import { exitPlan, settle, SettlementOut } from '../core/settle';
 import { remindersFor, shouldPopup, unseen } from '../reminders';
 import { buildSuggestions, personalLabels, rememberLabel } from '../suggestions';
 import {
@@ -9,16 +9,23 @@ import {
   addSelf,
   approveRequest,
   claimMember,
+  countedTransfers,
   demoActAs,
   EDIT_WINDOW_MS,
   Expense,
+  isActive,
   isDemo,
+  isInvolved,
   JoinRequest,
+  leaveGroup,
+  leaveWithSettlement,
   Member,
   rejectRequest,
+  removeMember,
   requestName,
   saveExpense,
   setExpenseDeleted,
+  setJoinOpen,
   syncMyCopy,
   updateActivity,
   useActivity,
@@ -42,24 +49,25 @@ export interface Ctx {
   changed: boolean;
 }
 
-export function settledTransfers(data: ActivityData) {
-  return data.payments.filter((p) => p.status !== 'open').map((p) => ({ from: p.from, to: p.to, amountCents: p.amountCents }));
-}
 
 export function ActivityScreen({ uid, aid, view }: { uid: string; aid: string; view: string }) {
   const data = useActivity(aid, uid);
   const { activity, members, expenses } = data;
   const settings = activity?.settings ?? { mode: 'relaxed' as const, roundingStepCents: null, toleranceCents: null };
   const memberIds = members.map((m) => m.id);
-  const plain = useMemo(() => settle(aid, memberIds, expenses, settings), [aid, members, expenses, activity]); // eslint-disable-line react-hooks/exhaustive-deps
-  const transfers = settledTransfers(data);
+  // Wer vorzeitig gegangen ist, ist mit dem Teilausgleich fertig abgerechnet
+  const frozen = members.filter((m) => m.leftAt).map((m) => m.id);
+  const plain = useMemo(
+    () => settle(aid, memberIds, expenses, settings, countedTransfers(data.payments, false), frozen),
+    [aid, members, expenses, activity, data.payments], // eslint-disable-line react-hooks/exhaustive-deps
+  );
   // Nach dem Kassensturz: bereits gezahlte Beträge bleiben, nur die Differenz wird neu verteilt
   const result = useMemo(
-    () => (data.settlement ? settle(aid, memberIds, expenses, settings, transfers) : plain),
+    () => (data.settlement ? settle(aid, memberIds, expenses, settings, countedTransfers(data.payments, true), frozen) : plain),
     [plain, data.settlement, data.payments], // eslint-disable-line react-hooks/exhaustive-deps
   );
   const changed = data.settlement != null && data.settlement.inputHash !== plain.inputHash;
-  const me = members.find((m) => m.uid === uid);
+  const me = members.find((m) => m.uid === uid && !m.leftAt) ?? members.find((m) => m.uid === uid);
 
   // Archiv-Kopie und Status „erledigt“ aktuell halten
   const finished =
@@ -112,7 +120,7 @@ export function ActivityScreen({ uid, aid, view }: { uid: string; aid: string; v
 /** Nach genehmigtem Beitritt: freien Namen übernehmen oder sich neu eintragen. */
 function WhoAreYou({ uid, aid, title, members }: { uid: string; aid: string; title: string; members: Member[] }) {
   const [name, setName] = useState(localStorage.getItem('fair.name') ?? '');
-  const free = members.filter((m) => !m.uid);
+  const free = members.filter((m) => !m.uid && !m.leftAt);
   return (
     <main>
       <Header title={title} back={''} />
@@ -191,7 +199,14 @@ function Main(ctx: Ctx) {
   const [toast, setToast] = useState('');
   const settled = activity.status !== 'open';
   const step = Math.max(result.stepCents, 100);
-  const pending = data.requests.filter((r) => r.status === 'pending');
+  const pending = data.requests.filter((r) => r.status === 'pending' && !(r.uid && activity.memberUids.includes(r.uid)));
+  const active = data.members.filter(isActive);
+  // Ausgeschiedene bleiben sichtbar, wenn sie etwas übernommen haben (Nachvollziehbarkeit)
+  const shown = data.members.filter((m) => isActive(m) || isInvolved(m.id, data.expenses));
+  const exits = data.payments.filter((p) => p.kind === 'exit');
+  const exitsDone = exits.filter((p) => p.status === 'received' || p.status === 'closed').length;
+  const doorOpen = !!activity.joinOpen && !settled;
+  const gone = !!me.leftAt;
   const reminders = unseen(remindersFor({ aid, title: activity.title, uid, myMemberId: me.id, members: data.members, payments: data.payments, requests: data.requests }));
   const [popup, setPopup] = useState(false);
   useEffect(() => {
@@ -213,9 +228,20 @@ function Main(ctx: Ctx) {
       />
       {!online ? <p className="banner">Kein Netz. Du kannst weiter erfassen, es wird später übertragen.</p> : null}
       {online && data.pendingWrites ? <p className="banner soft">Wird übertragen …</p> : null}
-      {pending.map((r) => (
+      {gone ? (
+        <p className="card warn-card">
+          Du bist am {time(me.leftAt!)} ausgeschieden. Du kannst hier weiter mitlesen{exits.length ? ' und deinen Teilausgleich erledigen' : ''}, aber nichts mehr eintragen.
+        </p>
+      ) : null}
+      {!gone && pending.map((r) => (
         <RequestCard key={r.id} ctx={ctx} req={r} />
       ))}
+      {doorOpen && !gone && active.length < 2 ? <InviteCard ctx={ctx} /> : null}
+      {exits.length > 0 && !settled ? (
+        <button className="card settled-strip" onClick={() => go(`/a/${aid}/settle`)}>
+          Teilausgleich · {exitsDone} von {exits.length} {exits.length === 1 ? 'Zahlung' : 'Zahlungen'} erledigt ›
+        </button>
+      ) : null}
       {settled ? (
         <button className="card settled-strip" onClick={() => go(`/a/${aid}/settle`)}>
           {ctx.changed
@@ -234,15 +260,15 @@ function Main(ctx: Ctx) {
           <CountUp cents={result.totalCents} />
         </strong>
         <small>gemeinsam ausgegeben</small>
-        <div className="avatar-row" aria-label={`${data.members.length} Personen`}>
-          {data.members.map((m) => (
+        <div className="avatar-row" aria-label={`${active.length} Personen`}>
+          {active.map((m) => (
             <Avatar key={m.id} member={m} size={34} />
           ))}
         </div>
       </div>
       <h3 className="section">Bisher übernommen</h3>
       <div className="tiles-2">
-        {data.members.map((m, i) => {
+        {shown.map((m, i) => {
           const paid = result.paid[m.id] ?? 0;
           return (
             <div className="card tile-person pop" key={m.id} style={{ animationDelay: `${0.15 + i * 0.05}s` }}>
@@ -252,7 +278,8 @@ function Main(ctx: Ctx) {
                 {m.id === me.id ? <span className="you">du</span> : null}
               </div>
               <div className={`tile-amount ${paid === 0 ? 'zero' : ''}`}>{euro(paid)}</div>
-              {standing && !settled ? <small>{standingText(result.balances[m.id] ?? 0, step, result.toleranceCents)}</small> : null}
+              {m.leftAt ? <small className="gone-note">vorzeitig gegangen</small> : null}
+              {standing && !settled && !m.leftAt ? <small>{standingText(result.balances[m.id] ?? 0, step, result.toleranceCents)}</small> : null}
             </div>
           );
         })}
@@ -269,13 +296,18 @@ function Main(ctx: Ctx) {
           Details anzeigen
         </button>
       </div>
-      {!settled ? (
+      {doorOpen && !gone && active.length >= 2 ? (
+        <button className="link center-link" onClick={() => go(`/a/${aid}/info`)}>
+          Gruppe ist offen · weitere Personen einladen ›
+        </button>
+      ) : null}
+      {!settled && !gone ? (
         <button className="btn wide" onClick={() => go(`/a/${aid}/settle`)}>
           Kassensturz
         </button>
       ) : null}
       {toast ? <p className="toast">{toast}</p> : null}
-      <div className="dock">
+      {gone ? null : <div className="dock">
         <button className="btn primary grow big" onClick={() => setSheet('new')}>
           <PlusIcon /> Ausgabe
         </button>
@@ -284,7 +316,7 @@ function Main(ctx: Ctx) {
             Für alle
           </button>
         ) : null}
-      </div>
+      </div>}
       {sheet ? (
         <ExpenseSheet
           ctx={ctx}
@@ -301,6 +333,35 @@ function Main(ctx: Ctx) {
       ) : null}
       {popup ? <ReminderPopup items={reminders} onClose={() => setPopup(false)} /> : null}
     </main>
+  );
+}
+
+/** Einladen: QR-Code und Link. Bei offener Tür ist man nach dem Scannen sofort dabei. */
+function InviteCard({ ctx, big = true }: { ctx: Ctx; big?: boolean }) {
+  const { activity, aid } = ctx;
+  const [note, setNote] = useState('');
+  const link = inviteLink(aid, activity.token);
+  const open = !!activity.joinOpen && activity.status === 'open';
+  return (
+    <div className={`card invite ${big ? 'pop' : ''}`}>
+      {big ? <h3>Jetzt die anderen dazuholen</h3> : null}
+      <p className="muted">
+        {open
+          ? 'Lass den QR-Code scannen. Wer scannt, gibt seinen Namen ein und ist sofort dabei.'
+          : 'Die Gruppe ist geschlossen. Wer jetzt scannt, kann den Beitritt nur anfragen; alle, die die App nutzen, müssen zustimmen.'}
+      </p>
+      <Qr text={link} label="QR-Code zum Beitreten" />
+      <button
+        className="btn primary wide"
+        onClick={async () => {
+          const r = await share(`Mach mit bei „${activity.title}“ in Ausgleich.app:`, link);
+          setNote(r === 'copied' ? 'Link kopiert.' : r === 'failed' ? 'Teilen nicht möglich. Bitte den QR-Code zeigen.' : '');
+        }}
+      >
+        Link teilen
+      </button>
+      {note ? <p className="muted center">{note}</p> : null}
+    </div>
   );
 }
 
@@ -324,7 +385,12 @@ export function ExpenseSheet(props: { ctx: Ctx; existing: Expense | null; quick:
   const { ctx, existing } = props;
   const { data, activity, me, aid, uid, byId } = ctx;
   const weighted = activity.settings.mode !== 'relaxed';
-  const everyone = () => Object.fromEntries(data.members.map((m) => [m.id, 1]));
+  // Wählbar: wer noch dabei ist, plus wer in dieser Ausgabe schon vorkommt
+  const pickable = data.members.filter(
+    (m) => isActive(m) || (existing != null && (existing.payerId === m.id || existing.participants.some((p) => p.memberId === m.id))),
+  );
+  const activeMembers = data.members.filter(isActive);
+  const everyone = () => Object.fromEntries(activeMembers.map((m) => [m.id, 1]));
   const [amount, setAmount] = useState(existing ? (existing.amountCents / 100).toFixed(2).replace('.', ',').replace(',00', '') : '');
   const [label, setLabel] = useState(existing?.label ?? '');
   const [payer, setPayer] = useState(existing?.payerId ?? me.id);
@@ -350,8 +416,8 @@ export function ExpenseSheet(props: { ctx: Ctx; existing: Expense | null; quick:
     return buildSuggestions({ ...base, typed: label });
   }, [data.expenses, activity.title, activity.topic, personal, label]);
   const cents = parseAmount(amount);
-  const selected = data.members.filter((m) => (weights[m.id] ?? 0) > 0);
-  const allOn = selected.length === data.members.length && selected.every((m) => weights[m.id] === 1);
+  const selected = pickable.filter((m) => (weights[m.id] ?? 0) > 0);
+  const allOn = selected.length === activeMembers.length && selected.every((m) => isActive(m) && weights[m.id] === 1);
   const valid = cents != null && label.trim().length > 0 && (treat || selected.length > 0) && reasonOk;
   const tap = (id: string) => {
     const w = weights[id] ?? 0;
@@ -412,7 +478,7 @@ export function ExpenseSheet(props: { ctx: Ctx; existing: Expense | null; quick:
       </div>
       <h3>Bezahlt von</h3>
       <div className="chips">
-        {data.members.map((m) => (
+        {pickable.map((m) => (
           <Chip key={m.id} on={payer === m.id} onClick={() => setPayer(m.id)}>
             {m.id === me.id ? 'Ich' : m.name}
           </Chip>
@@ -425,7 +491,7 @@ export function ExpenseSheet(props: { ctx: Ctx; existing: Expense | null; quick:
             <Chip on={allOn} onClick={() => setWeights(allOn ? {} : everyone())}>
               alle
             </Chip>
-            {data.members.map((m) => (
+            {pickable.map((m) => (
               <Chip key={m.id} on={(weights[m.id] ?? 0) > 0} onClick={() => tap(m.id)}>
                 {m.name}
                 {weightMark(weights[m.id] ?? 0)}
@@ -497,7 +563,8 @@ function Details(ctx: Ctx) {
   const forWhom = (e: Expense) => {
     if (e.isTreat) return 'übernommen';
     const ids = e.participants.map((p) => p.memberId).filter((id) => byId[id]);
-    if (ids.length === data.members.length) return 'für alle';
+    const then = data.members.filter((m) => m.createdAt <= e.spentAt && (!m.leftAt || m.leftAt > e.spentAt));
+    if (then.length > 0 && then.every((m) => ids.includes(m.id))) return 'für alle';
     return 'für ' + ids.map((id) => byId[id].name).join(', ');
   };
   return (
@@ -513,7 +580,7 @@ function Details(ctx: Ctx) {
       />
       {data.expenses.length === 0 ? <p className="muted center">Noch keine Ausgaben.</p> : null}
       {data.expenses.map((e) => (
-        <button className="card row" key={e.id} onClick={() => setEdit(e)}>
+        <button className="card row" key={e.id} onClick={() => !me.leftAt && setEdit(e)}>
           <Avatar member={byId[e.payerId]} size={36} />
           <span className="grow">
             <strong>
@@ -576,7 +643,9 @@ function Info(ctx: Ctx) {
   const [note, setNote] = useState('');
   const [name, setName] = useState('');
   const [topic, setTopic] = useState(activity.topic ?? '');
-  const link = inviteLink(aid, activity.token);
+  const [leaving, setLeaving] = useState<Member | null>(null);
+  const active = data.members.filter(isActive);
+  const everything = [...data.expenses, ...data.deleted];
   const owner = activity.createdBy === uid;
   const s = activity.settings;
   const days = s.reminderDays ?? 3;
@@ -589,7 +658,7 @@ function Info(ctx: Ctx) {
           <strong>{activity.title}</strong>
         </p>
         {activity.topic ? <p>Anlass: {activity.topic}</p> : null}
-        <p>{data.members.length} Personen</p>
+        <p>{active.length} Personen</p>
         <p>Modus: {modeName(s.mode)}</p>
         <p>{roundingText(s.roundingStepCents, s.toleranceCents)}</p>
         <p>Zahlen und Bestätigen innerhalb von {days} {days === 1 ? 'Tag' : 'Tagen'} nach dem Kassensturz</p>
@@ -641,37 +710,69 @@ function Info(ctx: Ctx) {
           <p className="muted">Alle sehen die Änderung sofort.</p>
         </>
       ) : null}
-      <h3>Freunde einladen</h3>
-      <Qr text={link} label="QR-Code zum Beitreten" />
-      <button
-        className="btn primary wide"
-        onClick={async () => {
-          const r = await share(`Mach mit bei „${activity.title}“ in Ausgleich.app:`, link);
-          setNote(r === 'copied' ? 'Link kopiert.' : r === 'failed' ? 'Teilen nicht möglich. Bitte den QR-Code zeigen.' : '');
-        }}
-      >
-        Link teilen
-      </button>
-      {note ? <p className="muted center">{note}</p> : null}
-      <p className="muted">
-        Wer den Link öffnet, kann den Beitritt nur anfragen. Dabei ist er erst, wenn alle zugestimmt haben, die die App schon nutzen. Ausgaben von vor dem
-        Beitritt werden nicht auf ihn verteilt.
-      </p>
-      <h3>Person ohne App hinzufügen</h3>
-      <div className="inline">
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name" maxLength={30} />
-        <button
-          className="btn"
-          disabled={!name.trim()}
-          onClick={() => {
-            requestName(aid, uid, name.trim().slice(0, 30), activity.memberUids, data.members.length);
-            setNote(activity.memberUids.length > 1 ? 'Vorschlag gesendet. Die anderen müssen noch zustimmen.' : '');
-            setName('');
-          }}
-        >
-          Vorschlagen
-        </button>
-      </div>
+      {!me.leftAt ? (
+        <>
+          <h3>Freunde einladen</h3>
+          {open && owner ? (
+            <label className="switch">
+              <input type="checkbox" checked={!!activity.joinOpen} onChange={(e) => setJoinOpen(aid, e.target.checked)} />
+              <span>{activity.joinOpen ? 'Gruppe offen: Wer scannt, ist sofort dabei' : 'Gruppe geschlossen: Neue brauchen die Zustimmung aller'}</span>
+            </label>
+          ) : null}
+          <InviteCard ctx={ctx} big={false} />
+          <p className="muted">
+            {activity.joinOpen && open
+              ? 'Sobald alle da sind, kannst du die Gruppe schließen. Beim Kassensturz schließt sie automatisch.'
+              : 'Ausgaben von vor dem Beitritt werden nicht auf neue Personen verteilt.'}
+          </p>
+          <h3>Person ohne App hinzufügen</h3>
+          <div className="inline">
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name" maxLength={30} />
+            <button
+              className="btn"
+              disabled={!name.trim()}
+              onClick={() => {
+                const direct = activity.memberUids.length <= 1 || !!activity.joinOpen;
+                requestName(aid, uid, name.trim().slice(0, 30), activity.memberUids, data.members.length, !!activity.joinOpen);
+                setNote(direct ? `${name.trim()} ist dabei.` : 'Vorschlag gesendet. Die anderen müssen noch zustimmen.');
+                setName('');
+              }}
+            >
+              Hinzufügen
+            </button>
+          </div>
+          {note ? <p className="muted center">{note}</p> : null}
+        </>
+      ) : null}
+      {open && !me.leftAt ? (
+        <>
+          <h3>Personen</h3>
+          {active.map((m) => {
+            const involved = isInvolved(m.id, everything);
+            const self = m.id === me.id;
+            const canAct = self ? !(owner && !involved) : owner && !m.uid;
+            return (
+              <div className="card row" key={m.id}>
+                <Avatar member={m} size={32} />
+                <span className="grow">
+                  <strong>{self ? `${m.name} (du)` : m.name}</strong>
+                  <small>{m.uid ? 'nutzt die App' : 'ohne App'}</small>
+                </span>
+                {canAct ? (
+                  <button className="btn" onClick={() => setLeaving(m)}>
+                    {involved ? (self ? 'Vorzeitig gehen' : 'Geht vorzeitig') : self ? 'Ich bin raus' : 'Entfernen'}
+                  </button>
+                ) : null}
+              </div>
+            );
+          })}
+          <p className="muted">
+            Austreten geht ohne Weiteres, solange jemand in keiner Ausgabe vorkommt. Sonst bekommt nur diese Person einen Teilausgleich, und die anderen
+            rechnen hier weiter.
+          </p>
+        </>
+      ) : null}
+      {leaving ? <LeaveSheet ctx={ctx} member={leaving} involved={isInvolved(leaving.id, everything)} onClose={() => setLeaving(null)} /> : null}
       {isDemo ? (
         <>
           <h3>Demo: Ansicht als …</h3>
@@ -692,5 +793,92 @@ function Info(ctx: Ctx) {
         Zur Aktivität
       </button>
     </main>
+  );
+}
+
+/** Austreten: ohne Ausgaben einfach raus, sonst Teilausgleich nur für diese Person. */
+function LeaveSheet({ ctx, member, involved, onClose }: { ctx: Ctx; member: Member; involved: boolean; onClose: () => void }) {
+  const { activity, aid, data, uid, me, byId } = ctx;
+  const online = useOnline();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const self = member.id === me.id;
+  const days = activity.settings.reminderDays ?? 3;
+  const plan = useMemo(
+    () => (involved ? exitPlan(member.id, data.members.map((m) => m.id), data.expenses, activity.settings, countedTransfers(data.payments, false)) : []),
+    [involved, member.id, data.members, data.expenses, data.payments, activity.settings],
+  );
+  const name = (id: string) => (id === me.id ? 'Du' : (byId[id]?.name ?? '?'));
+  const who = self ? 'Du' : member.name;
+
+  const go1 = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      if (involved) {
+        leaveWithSettlement(aid, uid, member.id, plan, days);
+        onClose();
+        go(plan.length ? `/a/${aid}/settle` : `/a/${aid}`);
+      } else if (self) {
+        await leaveGroup(aid, uid, member.id);
+        go('/');
+      } else {
+        removeMember(aid, member.id, uid);
+        onClose();
+      }
+    } catch (e) {
+      console.error(e);
+      setError('Das hat nicht geklappt. Bitte prüfe die Internetverbindung.');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Sheet title={involved ? 'Vorzeitig gehen' : self ? 'Ich bin raus' : `${member.name} entfernen`} onClose={onClose}>
+      {!involved ? (
+        <p>
+          {self
+            ? 'Du kommst in keiner Ausgabe vor. Du verlässt die Gruppe und siehst sie danach nicht mehr.'
+            : `${member.name} kommt in keiner Ausgabe vor und wird aus der Gruppe genommen.`}
+        </p>
+      ) : (
+        <>
+          <p>
+            {who} {self ? 'bist' : 'ist'} schon an Ausgaben beteiligt. Deshalb gibt es einen <strong>Teilausgleich nur für {self ? 'dich' : member.name}</strong>
+            . Die anderen rechnen in dieser Aktivität einfach weiter.
+          </p>
+          {plan.length === 0 ? (
+            <p className="card center">{who} {self ? 'bist' : 'ist'} ungefähr ausgeglichen. Es ist nichts zu zahlen.</p>
+          ) : (
+            plan.map((p, i) => (
+              <div className="card pay" key={i}>
+                <Avatar member={byId[p.from]} size={36} />
+                <span className="grow">
+                  <strong>
+                    {name(p.from)} → {name(p.to)}
+                  </strong>
+                  <small>Teilausgleich</small>
+                </span>
+                <span className="amount">{euro(p.amountCents)}</span>
+              </div>
+            ))
+          )}
+          <p className="muted">
+            Ab jetzt {self ? 'bist du' : `ist ${member.name}`} bei neuen Ausgaben nicht mehr dabei. Bezahlt und bestätigt wird wie beim Kassensturz. Im Bericht
+            wird der Austritt mit Datum vermerkt.
+          </p>
+        </>
+      )}
+      {!online ? <p className="warn">Dafür brauchst du kurz Internet.</p> : null}
+      {error ? <p className="warn">{error}</p> : null}
+      <div className="bar">
+        <button className="btn" onClick={onClose}>
+          Abbrechen
+        </button>
+        <button className="btn primary grow" disabled={busy || !online} onClick={go1}>
+          {involved ? 'Austreten mit Teilausgleich' : self ? 'Gruppe verlassen' : 'Entfernen'}
+        </button>
+      </div>
+    </Sheet>
   );
 }
