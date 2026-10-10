@@ -1,0 +1,199 @@
+rules_version = '2';
+
+// Grundsätze
+// 1. Eine Aktivität sehen nur ihre Mitglieder (Liste memberUids). Wer bei einer früheren Aktivität
+//    dabei war, hat dadurch keinen Zugriff auf spätere.
+// 2. Neue Mitglieder kommen nur hinzu, wenn alle bisherigen App-Mitglieder zugestimmt haben.
+// 3. Ausgaben: Änderungen ohne Begründung nur bis 12 Stunden nach dem Eintragen und nur vor dem Kassensturz.
+// 4. Zahlungen: „überwiesen“ meldet nur der Zahler, „erhalten“ bestätigt nur der Empfänger.
+//    Ohne Bestätigung abschließen geht nur mit Begründung.
+// Alles, was hier nicht ausdrücklich erlaubt ist, ist verboten.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function shortText(value, min, max) { return value is string && value.size() >= min && value.size() <= max; }
+
+    // Persönliches Archiv: nur die eigene Liste
+    match /users/{uid}/activities/{aid} {
+      allow read, write: if signedIn() && request.auth.uid == uid;
+    }
+
+    match /activities/{aid} {
+      function path() { return /databases/$(database)/documents/activities/$(aid); }
+      function activity() { return get(path()).data; }
+      function isMember() { return signedIn() && request.auth.uid in activity().memberUids; }
+      function isOwner() { return signedIn() && activity().createdBy == request.auth.uid; }
+      function memberUid(memberId) { return get(/databases/$(database)/documents/activities/$(aid)/members/$(memberId)).data.uid; }
+      function unchanged(keys) { return !request.resource.data.diff(resource.data).affectedKeys().hasAny(keys); }
+      function onlyChanged(keys) { return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys); }
+
+      allow get: if signedIn() && request.auth.uid in resource.data.memberUids;
+      allow list: if false;
+      allow create: if signedIn()
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.memberUids == [request.auth.uid]
+        && shortText(request.resource.data.title, 1, 60)
+        && request.resource.data.status == 'open';
+      allow update: if
+        // a) normale Änderungen durch Mitglieder; Mitgliederliste bleibt gleich.
+        //    Titel, Anlass, Einstellungen und Einladung ändert nur der Organisator.
+        (signedIn() && request.auth.uid in resource.data.memberUids
+          && unchanged(['createdBy', 'memberUids', 'token', 'createdAt'])
+          && request.resource.data.status in ['open', 'settled', 'done']
+          && (resource.data.createdBy == request.auth.uid || unchanged(['settings', 'title', 'topic'])))
+        // b) Beitritt: sich selbst anhängen, nur mit von allen genehmigter Anfrage
+        || (signedIn() && !(request.auth.uid in resource.data.memberUids)
+          && onlyChanged(['memberUids'])
+          && request.resource.data.memberUids == resource.data.memberUids.concat([request.auth.uid])
+          && get(/databases/$(database)/documents/activities/$(aid)/requests/$(request.auth.uid)).data.status == 'approved'
+          && get(/databases/$(database)/documents/activities/$(aid)/requests/$(request.auth.uid)).data.approvals.hasAll(resource.data.memberUids));
+      allow delete: if false;
+
+      // Einladung: lesbar nur mit bekanntem Token, nie auflistbar
+      match /invites/{token} {
+        allow get: if signedIn();
+        allow list: if false;
+        allow create, delete: if isOwner();
+        allow update: if false;
+      }
+
+      // Beitrittsanfragen (kind 'join': eine Person mit App; kind 'name': ein Name ohne App)
+      match /requests/{rid} {
+        allow get: if isMember() || (signedIn() && rid == request.auth.uid);
+        allow list: if isMember();
+        allow create: if signedIn()
+          && shortText(request.resource.data.name, 1, 30)
+          && request.resource.data.requestedBy == request.auth.uid
+          && request.resource.data.rejectedBy == null
+          && (
+            (request.resource.data.kind == 'join'
+              && rid == request.auth.uid
+              && request.resource.data.uid == request.auth.uid
+              && !(request.auth.uid in activity().memberUids)
+              && request.resource.data.token is string
+              && exists(/databases/$(database)/documents/activities/$(aid)/invites/$(request.resource.data.token))
+              && request.resource.data.approvals == []
+              && request.resource.data.status == 'pending')
+            || (request.resource.data.kind == 'name'
+              && isMember()
+              && request.resource.data.uid == null
+              && request.resource.data.approvals == [request.auth.uid]
+              && (request.resource.data.status == 'pending'
+                || (request.resource.data.status == 'approved' && request.resource.data.approvals.hasAll(activity().memberUids))))
+          );
+        allow update: if isMember() && resource.data.status == 'pending' && (
+          // zustimmen: nur die eigene Stimme anhängen; „genehmigt“ erst, wenn alle zugestimmt haben
+          (onlyChanged(['approvals', 'status'])
+            && !(request.auth.uid in resource.data.approvals)
+            && request.resource.data.approvals == resource.data.approvals.concat([request.auth.uid])
+            && (request.resource.data.status == 'pending'
+              || (request.resource.data.status == 'approved' && request.resource.data.approvals.hasAll(activity().memberUids))))
+          // ablehnen
+          || (onlyChanged(['status', 'rejectedBy'])
+            && request.resource.data.status == 'rejected'
+            && request.resource.data.rejectedBy == request.auth.uid)
+        );
+        // Die anfragende Person kann ihre offene Anfrage zurückziehen
+        allow delete: if signedIn() && resource.data.requestedBy == request.auth.uid && resource.data.status != 'approved';
+      }
+
+      match /members/{memberId} {
+        allow read: if isMember();
+        allow create: if isMember()
+          && shortText(request.resource.data.name, 1, 30)
+          && (
+            // sich selbst eintragen (nach genehmigtem Beitritt oder als Organisator beim Anlegen)
+            (memberId == request.auth.uid && request.resource.data.uid == request.auth.uid)
+            // Name ohne App: solange nur eine Person die App nutzt, oder mit genehmigter Anfrage
+            || (request.resource.data.uid == null
+              && (activity().memberUids.size() == 1
+                || get(/databases/$(database)/documents/activities/$(aid)/requests/$(memberId)).data.status == 'approved'))
+          );
+        // einen freien Namen übernehmen: nur für sich selbst und nur, wenn er noch frei ist
+        allow update: if isMember()
+          && onlyChanged(['uid'])
+          && resource.data.uid == null
+          && request.resource.data.uid == request.auth.uid;
+        allow delete: if false;
+      }
+
+      match /expenses/{expenseId} {
+        function valid() {
+          return request.resource.data.amountCents is int
+            && request.resource.data.amountCents > 0
+            && request.resource.data.amountCents < 100000000
+            && shortText(request.resource.data.label, 1, 60)
+            && request.resource.data.payerId is string
+            && request.resource.data.participants is list
+            && request.resource.data.participants.size() <= 30
+            && request.resource.data.isTreat is bool;
+        }
+        // Begründung, die zu genau dieser Version gehört
+        function reasoned() {
+          return shortText(request.resource.data.get('reason', ''), 5, 300)
+            && request.resource.data.get('reasonVersion', 0) == request.resource.data.version;
+        }
+        allow read: if isMember();
+        allow create: if isMember() && valid()
+          && request.resource.data.createdBy == request.auth.uid
+          && request.resource.data.version == 1
+          && (activity().status == 'open' || reasoned());
+        allow update: if isMember() && valid()
+          && unchanged(['createdBy', 'createdAt', 'spentAt'])
+          && request.resource.data.version == resource.data.version + 1
+          && ((activity().status == 'open' && request.time.toMillis() < resource.data.createdAt + 43200000)
+            || reasoned());
+        // Gelöscht wird nur als Markierung (deletedAt), damit es wiederherstellbar bleibt.
+        allow delete: if false;
+      }
+
+      // Verlauf: nur anhängen, nie ändern oder löschen
+      match /history/{entryId} {
+        allow read: if isMember();
+        allow create: if isMember() && shortText(request.resource.data.summary, 1, 300);
+        allow update, delete: if false;
+      }
+
+      match /payees/{memberId} {
+        allow read: if isMember();
+        allow create, update: if isMember()
+          && request.resource.data.iban is string && request.resource.data.iban.size() <= 40
+          && request.resource.data.holder is string && request.resource.data.holder.size() <= 70
+          && request.resource.data.paypal is string && request.resource.data.paypal.size() <= 30;
+        allow delete: if isMember();
+      }
+
+      match /settlements/{settlementId} {
+        allow read, write: if isMember();
+      }
+
+      match /payments/{paymentId} {
+        function isPayer() { return memberUid(resource.data.from) == request.auth.uid; }
+        function isReceiver() { return memberUid(resource.data.to) == request.auth.uid; }
+        function to(status) { return request.resource.data.status == status; }
+        allow read: if isMember();
+        allow create: if isMember()
+          && request.resource.data.status == 'open'
+          && request.resource.data.amountCents is int
+          && request.resource.data.amountCents > 0;
+        allow update: if isMember()
+          && unchanged(['from', 'to', 'amountCents', 'exactCents', 'round', 'createdAt'])
+          && (
+            // Zahler meldet „überwiesen“ oder nimmt es zurück
+            (isPayer() && resource.data.status == 'open' && to('sent'))
+            || (isPayer() && resource.data.status == 'sent' && to('open'))
+            // nur der Empfänger bestätigt den Eingang oder meldet „noch nicht angekommen“
+            || (isReceiver() && resource.data.status in ['open', 'sent'] && to('received'))
+            || (isReceiver() && resource.data.status == 'sent' && to('open'))
+            // Ausnahme: ohne Bestätigung abschließen, nur Zahler oder Organisator, mit Begründung
+            || ((isPayer() || isOwner()) && resource.data.status in ['open', 'sent'] && to('closed')
+              && shortText(request.resource.data.closedReason, 10, 300)
+              && request.resource.data.closedBy == request.auth.uid)
+          );
+        // Nur noch offene Zahlungen dürfen bei einem Nachausgleich ersetzt werden
+        allow delete: if isMember() && resource.data.status == 'open';
+      }
+    }
+  }
+}
