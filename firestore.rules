@@ -7,7 +7,7 @@ rules_version = '2';
 //    Ist sie geschlossen, müssen alle bisherigen App-Mitglieder zustimmen.
 // 2b. Austreten: ohne Ausgaben verlässt man die Gruppe selbst; mit Ausgaben gibt es einen Teilausgleich
 //    (Markierung leftAt), die Person behält Lesezugriff. Personen ohne App entfernt der Organisator.
-// 3. Ausgaben: Änderungen ohne Begründung nur bis 12 Stunden nach dem Eintragen und nur vor dem Kassensturz.
+// 3. Ausgaben: Änderungen ohne Begründung nur bis 12 Stunden nach dem Eintragen und nur vor dem Ausgleich.
 // 4. Zahlungen: „überwiesen“ meldet nur der Zahler, „erhalten“ bestätigt nur der Empfänger.
 //    Ohne Bestätigung abschließen geht nur mit Begründung.
 // Alles, was hier nicht ausdrücklich erlaubt ist, ist verboten.
@@ -43,9 +43,12 @@ service cloud.firestore {
         //    Titel, Anlass, Einstellungen und Einladung ändert nur der Organisator.
         (signedIn() && request.auth.uid in resource.data.memberUids
           && unchanged(['createdBy', 'memberUids', 'token', 'createdAt'])
-          && request.resource.data.status in ['open', 'settled', 'done']
-          && (resource.data.createdBy == request.auth.uid || unchanged(['settings', 'title', 'topic']))
-          // Gruppe öffnen/schließen nur der Organisator; schließen (beim Kassensturz) darf jedes Mitglied
+          && request.resource.data.status in ['open', 'settled', 'done', 'cancelled']
+          && (resource.data.createdBy == request.auth.uid || unchanged(['settings', 'title', 'topic', 'picture', 'startsAt', 'endsAt']))
+          // Absagen und wieder aufnehmen nur der Organisator; abgesagte Aktivitäten ändert sonst niemand
+          && (request.resource.data.status != 'cancelled' || (resource.data.createdBy == request.auth.uid && resource.data.status in ['open', 'cancelled']))
+          && (resource.data.status != 'cancelled' || resource.data.createdBy == request.auth.uid)
+          // Gruppe öffnen/schließen nur der Organisator; schließen (beim Ausgleich) darf jedes Mitglied
           && (resource.data.createdBy == request.auth.uid || unchanged(['joinOpen']) || request.resource.data.joinOpen == false))
         // b) Beitritt: sich selbst anhängen, mit Anfrage über gültigen Einladungslink.
         //    Offene Gruppe: sofort. Geschlossene Gruppe: nur mit Zustimmung aller.
@@ -56,7 +59,7 @@ service cloud.firestore {
           && (resource.data.get('joinOpen', false) == true
             || (get(/databases/$(database)/documents/activities/$(aid)/requests/$(request.auth.uid)).data.status == 'approved'
               && get(/databases/$(database)/documents/activities/$(aid)/requests/$(request.auth.uid)).data.approvals.hasAll(resource.data.memberUids))))
-        // c) Austreten (ohne Ausgaben): sich selbst entfernen, nur vor dem Kassensturz, nicht der Organisator
+        // c) Austreten (ohne Ausgaben): sich selbst entfernen, nur vor dem Ausgleich, nicht der Organisator
         || (signedIn() && request.auth.uid in resource.data.memberUids
           && request.auth.uid != resource.data.createdBy
           && resource.data.status == 'open'
@@ -131,7 +134,11 @@ service cloud.firestore {
           (onlyChanged(['uid'])
             && resource.data.uid == null
             && request.resource.data.uid == request.auth.uid)
-          // ausscheiden: sich selbst, oder der Organisator eine Person ohne App; nur vor dem Kassensturz
+          // den eigenen Namen ändern
+          || (onlyChanged(['name'])
+            && resource.data.uid == request.auth.uid
+            && shortText(request.resource.data.name, 1, 30))
+          // ausscheiden: sich selbst, oder der Organisator eine Person ohne App; nur vor dem Ausgleich
           || (onlyChanged(['leftAt', 'leftBy'])
             && request.resource.data.leftAt is int
             && request.resource.data.leftBy == request.auth.uid
@@ -183,7 +190,8 @@ service cloud.firestore {
         allow create, update: if isMember()
           && request.resource.data.iban is string && request.resource.data.iban.size() <= 40
           && request.resource.data.holder is string && request.resource.data.holder.size() <= 70
-          && request.resource.data.paypal is string && request.resource.data.paypal.size() <= 30;
+          && request.resource.data.paypal is string && request.resource.data.paypal.size() <= 80
+          && request.resource.data.get('method', 'bank') in ['bank', 'paypal', 'cash'];
         allow delete: if isMember();
       }
 

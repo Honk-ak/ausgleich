@@ -4,6 +4,7 @@
   --accent: #1F5F66; --accent-ink: #FFFFFF; --soft: #DDEBEC;
   --coral: #E07A5F; --coral-soft: #F8E3DC; --coral-ink: #7A2F1C; --coral-text: #B4553D;
   --ok: #1F7A6E; --warn: #8A4B00; --warn-bg: #FFF1DC;
+  --art-sun: #F6C8B8; --art-far: #DDEBEC; --art-mid: #B5D3D5; --art-near: #6FA3A8; --art-ink: #1F5F66; --art-acc: #E07A5F; --art-light: #FFFFFF;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -12,6 +13,7 @@
     --accent: #6FB3BA; --accent-ink: #0E1D20; --soft: #1E3A3E;
     --coral: #E9937C; --coral-soft: #3E2A25; --coral-ink: #F6C9BB; --coral-text: #F0A48E;
     --ok: #7CC9BD; --warn: #F2C66D; --warn-bg: #3A2F18;
+    --art-sun: #6B4A40; --art-far: #1E3A3E; --art-mid: #285055; --art-near: #3B6E73; --art-ink: #8FC3C8; --art-acc: #E9937C; --art-light: #D7E6E6;
     color-scheme: dark;
   }
 }
@@ -213,3 +215,63 @@ h3.section { margin-top: 6px; }
 .card.invite { text-align: center; }
 .card.invite h3 { margin-top: 0; }
 .link.center-link { display: block; width: 100%; }
+
+/* Runde 5: Bilder zum Anlass */
+.art { display: block; }
+.art .a-sun { fill: var(--art-sun); }
+.art .a-far { fill: var(--art-far); }
+.art .a-mid { fill: var(--art-mid); }
+.art .a-near { fill: var(--art-near); }
+.art .a-ink { fill: var(--art-ink); }
+.art .a-acc { fill: var(--art-acc); }
+.art .a-light { fill: var(--art-light); }
+.art .a-line { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.art .a-ink.a-line, .art .a-ink .a-line, .art g.a-ink.a-line * { stroke: var(--art-ink); }
+.art .a-acc.a-line, .art g.a-acc.a-line * { stroke: var(--art-acc); fill: none; }
+.art .a-light.a-line { stroke: var(--art-light); }
+.art g.a-ink.a-line * { fill: none; }
+.art .a-thick, .art .a-thick * { stroke-width: 4; }
+.art .a-dash { stroke-dasharray: 2 6; }
+.hero-card { position: relative; overflow: hidden; }
+.hero-card .art { width: calc(100% + 40px); height: 118px; margin: -22px -20px 8px; -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent); mask-image: linear-gradient(to bottom, #000 60%, transparent); }
+.art-pick { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.art-pick button { padding: 4px; border-radius: 14px; border: 2px solid var(--line); background: var(--card); color: var(--ink); font: inherit; font-size: 12px; }
+.art-pick button.on { border-color: var(--accent); }
+.art-pick .art { width: 100%; height: 44px; border-radius: 10px; }
+.art-pick .none { height: 44px; display: flex; align-items: center; justify-content: center; color: var(--muted); }
+
+/* Startseite */
+.today-card { position: relative; overflow: hidden; text-align: left; padding: 0; border-radius: 24px; }
+.today-card .art { width: 100%; height: 110px; }
+.today-card .today-body { padding: 4px 18px 16px; display: flex; flex-direction: column; gap: 2px; }
+.today-card .kicker { color: var(--coral-text); font-weight: 700; font-size: 13px; letter-spacing: .3px; text-transform: uppercase; }
+.today-card strong { font-size: 20px; }
+.row .tick { color: var(--ok); font-weight: 700; }
+details.fold > summary { list-style: none; cursor: pointer; min-height: 44px; display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-weight: 600; font-size: 15px; }
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::after { content: '›'; transform: rotate(90deg); transition: transform .2s; font-size: 20px; }
+details.fold[open] > summary::after { transform: rotate(-90deg); }
+details.fold > div { display: flex; flex-direction: column; gap: 10px; }
+.section-head { display: flex; align-items: baseline; justify-content: space-between; }
+
+/* Zahlungskarten: klar antippbar */
+.card.pay.actionable { flex-wrap: wrap; border: 2px solid var(--accent); }
+.card.pay .pay-cta { flex-basis: 100%; text-align: right; color: var(--accent); font-weight: 700; font-size: 15px; }
+@media (prefers-reduced-motion: no-preference) {
+  .card.pay.actionable { animation: glow 1.4s ease-in-out 2; }
+}
+@keyframes glow { 0%, 100% { box-shadow: 0 0 0 0 transparent; } 50% { box-shadow: 0 0 0 6px var(--soft); } }
+
+/* Zahlungsweg-Wahl */
+.seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; background: var(--soft); padding: 4px; border-radius: 16px; }
+.seg button { min-height: 44px; border: 0; border-radius: 12px; background: transparent; color: var(--ink); font: inherit; font-weight: 600; font-size: 15px; }
+.seg button.on { background: var(--card); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+.date-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.date-row input { width: 100%; }
+.stack { display: flex; flex-direction: column; gap: 12px; }
+.wizard-art { width: 100%; height: 90px; border-radius: 18px; background: var(--card); }
+.payee-form { display: flex; flex-direction: column; gap: 12px; }
+.small-print { font-size: 13px; }
+.card.hello { display: flex; align-items: flex-start; gap: 8px; background: var(--coral-soft); border-color: transparent; }
+.card.hello p { flex: 1; }
+.card.pay .chev { color: var(--muted); }

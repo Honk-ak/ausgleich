@@ -3,7 +3,6 @@ import { markSeen, Reminder, remindersFor, shouldPopup, unseen } from '../remind
 import {
   completeJoin,
   createActivity,
-  enterAs,
   isMemberOf,
   joinNow,
   MyActivity,
@@ -14,21 +13,26 @@ import {
   useOnline,
   useSignals,
 } from '../store';
-import { Backdrop, Brand, Chip, FAIR_TEXT, go, Header, MODES, modeName, roundingText, Sheet } from '../ui';
+import { NameStep, PayeeStep } from './Onboard';
+import { Art, artFor } from '../art';
+import { Backdrop, Brand, Chip, dateRange, endOfDay, FAIR_TEXT, fromInputDate, go, Header, roundingText, Sheet, startOfDay, toInputDate } from '../ui';
 
 const MONTHS = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
-const STATUS: { id: string; name: string; match: (s: MyActivity['status']) => boolean }[] = [
+const ARCHIVE_STATUS: { id: string; name: string; match: (s: MyActivity['status']) => boolean }[] = [
   { id: 'all', name: 'Alle', match: () => true },
-  { id: 'open', name: 'Laufend', match: (s) => s === 'open' || s === 'pending' },
-  { id: 'settled', name: 'Zahlungen offen', match: (s) => s === 'settled' },
   { id: 'done', name: 'Erledigt', match: (s) => s === 'done' },
+  { id: 'cancelled', name: 'Abgesagt', match: (s) => s === 'cancelled' },
 ];
 const STATUS_TEXT: Record<MyActivity['status'], string> = {
   pending: 'wartet auf Zustimmung',
   open: 'läuft',
-  settled: 'Kassensturz gemacht, Zahlungen offen',
+  settled: 'Ausgleich vereinbart, Zahlungen offen',
   done: 'erledigt',
+  cancelled: 'abgesagt',
 };
+/** Erledigtes bleibt so lange oben stehen, danach rutscht es nach „Abgeschlossen“. */
+const KEEP_DONE_MS = 7 * 86400000;
+const SHOW_RUNNING = 3;
 
 export function ReminderPopup({ items, onClose }: { items: Reminder[]; onClose: () => void }) {
   useEffect(() => markSeen(items), [items]);
@@ -54,15 +58,25 @@ export function ReminderPopup({ items, onClose }: { items: Reminder[]; onClose: 
 }
 
 export function Home({ uid }: { uid: string }) {
-  const list = useMyActivities(uid);
+  const copies = useMyActivities(uid);
   const [text, setText] = useState('');
   const [status, setStatus] = useState('all');
   const [year, setYear] = useState('');
   const [month, setMonth] = useState('');
   const [day, setDay] = useState('');
   const [showFilter, setShowFilter] = useState(false);
-  const live = (list ?? []).filter((a) => a.status !== 'done' && a.status !== 'pending').map((a) => a.id);
+  const live = (copies ?? []).filter((a) => a.status !== 'done' && a.status !== 'pending' && a.status !== 'cancelled').map((a) => a.id);
   const signals = useSignals(uid, live);
+  // Die persönliche Kopie mit dem aktuellen Stand der Aktivität zusammenführen (z. B. abgesagt, neuer Termin)
+  const list = useMemo(
+    () =>
+      copies?.map((c) => {
+        const a = signals[c.id]?.activity;
+        if (!a) return c;
+        return { ...c, title: a.title, topic: a.topic ?? '', status: a.status, startsAt: a.startsAt, endsAt: a.endsAt, doneAt: a.doneAt ?? null, picture: a.picture };
+      }) ?? null,
+    [copies, signals],
+  );
   const reminders = useMemo(
     () =>
       unseen(
@@ -81,19 +95,45 @@ export function Home({ uid }: { uid: string }) {
     if (reminders.length > 0 && shouldPopup('home')) setPopup(true);
   }, [reminders.length]);
 
-  const date = (a: MyActivity) => new Date(a.startsAt || a.joinedAt);
-  const years = [...new Set((list ?? []).map((a) => date(a).getFullYear()))].sort((a, b) => b - a);
+  const now = Date.now();
+  const start = (a: MyActivity) => a.startsAt || a.joinedAt;
+  const archived = (a: MyActivity) => a.status === 'cancelled' || (a.status === 'done' && (a.doneAt ?? start(a)) < now - KEEP_DONE_MS);
+  const planning = (a: MyActivity) => a.status === 'open' || a.status === 'pending';
+  const isToday = (a: MyActivity) => planning(a) && start(a) <= endOfDay(now) && (a.endsAt ?? endOfDay(start(a))) >= startOfDay(now);
+  const isPlanned = (a: MyActivity) => planning(a) && start(a) > endOfDay(now);
+  const all = list ?? [];
+  const today = all.filter((a) => !archived(a) && isToday(a));
+  const planned = all.filter((a) => !archived(a) && isPlanned(a)).sort((a, b) => start(a) - start(b));
+  const running = all
+    .filter((a) => !archived(a) && !isToday(a) && !isPlanned(a))
+    .sort((a, b) => Number(b.status === 'settled') - Number(a.status === 'settled') || start(b) - start(a));
+  const archive = all.filter(archived).sort((a, b) => start(b) - start(a));
+
+  const date = (a: MyActivity) => new Date(start(a));
+  const years = [...new Set(archive.map((a) => date(a).getFullYear()))].sort((a, b) => b - a);
   const needle = text.trim().toLowerCase();
-  const shown = (list ?? []).filter((a) => {
+  const found = archive.filter((a) => {
     const d = date(a);
     if (year && d.getFullYear() !== Number(year)) return false;
     if (month && d.getMonth() + 1 !== Number(month)) return false;
     if (day && d.getDate() !== Number(day)) return false;
-    if (!STATUS.find((s) => s.id === status)!.match(a.status)) return false;
+    if (!ARCHIVE_STATUS.find((s) => s.id === status)!.match(a.status)) return false;
     if (!needle) return true;
     return [a.title, a.topic, ...(a.names ?? [])].some((v) => (v ?? '').toLowerCase().includes(needle));
   });
   const filtered = Boolean(needle || year || month || day || status !== 'all');
+  const open = (a: MyActivity) => go(a.status === 'pending' ? `/join/${a.id}/${a.token}` : `/a/${a.id}`);
+  const row = (a: MyActivity) => (
+    <button className="card row" key={a.id} onClick={() => open(a)}>
+      <span className="grow">
+        <strong>{a.title}</strong>
+        <small>
+          {dateRange(start(a), a.endsAt)} · {a.status === 'done' ? <span className="tick">✓ erledigt</span> : isPlanned(a) && a.status === 'open' ? 'geplant' : STATUS_TEXT[a.status]}
+        </small>
+      </span>
+      <span className="chev">›</span>
+    </button>
+  );
 
   return (
     <main>
@@ -102,95 +142,117 @@ export function Home({ uid }: { uid: string }) {
         <Brand />
         <p>Gemeinsam erleben. Nebenbei erfassen. Am Ende fair ausgleichen.</p>
       </div>
-      <button className="btn primary big" onClick={() => go('/new')}>
-        Neue Aktivität
-      </button>
       {reminders.length > 0 ? (
         <button className="card reminder-strip" onClick={() => setPopup(true)}>
           {reminders.length === 1 ? '1 Erinnerung' : `${reminders.length} Erinnerungen`} · ansehen
         </button>
       ) : null}
       {list == null ? <p className="muted center">Lädt …</p> : null}
-      {list != null && list.length > 0 ? (
+
+      {today.map((a) => (
+        <button className="card today-card pop" key={a.id} onClick={() => open(a)}>
+          <Art kind={artFor(a)} />
+          <span className="today-body">
+            <span className="kicker">Heute</span>
+            <strong>{a.title}</strong>
+            <small className="muted">
+              {dateRange(start(a), a.endsAt)} · {a.status === 'pending' ? STATUS_TEXT.pending : 'weiter erfassen ›'}
+            </small>
+          </span>
+        </button>
+      ))}
+
+      <button className="btn primary big" onClick={() => go('/new')}>
+        Neue Aktivität
+      </button>
+
+      {planned.length > 0 ? (
         <>
-          <div className="search">
-            <input
-              type="search"
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder="Suchen: Name, Anlass, Person"
-              aria-label="Archiv durchsuchen"
-            />
-            <button className={`btn ${showFilter || filtered ? 'on' : ''}`} onClick={() => setShowFilter(!showFilter)} aria-expanded={showFilter}>
-              Filter
-            </button>
-          </div>
-          {showFilter ? (
-            <div className="card filters">
-              <div className="chips">
-                {STATUS.map((s) => (
-                  <Chip key={s.id} on={status === s.id} onClick={() => setStatus(s.id)}>
-                    {s.name}
-                  </Chip>
-                ))}
-              </div>
-              <div className="selects">
-                <select value={year} onChange={(e) => setYear(e.target.value)} aria-label="Jahr">
-                  <option value="">Jahr</option>
-                  {years.map((y) => (
-                    <option key={y} value={y}>
-                      {y}
-                    </option>
-                  ))}
-                </select>
-                <select value={month} onChange={(e) => setMonth(e.target.value)} aria-label="Monat">
-                  <option value="">Monat</option>
-                  {MONTHS.map((m, i) => (
-                    <option key={m} value={i + 1}>
-                      {m}
-                    </option>
-                  ))}
-                </select>
-                <select value={day} onChange={(e) => setDay(e.target.value)} aria-label="Tag">
-                  <option value="">Tag</option>
-                  {Array.from({ length: 31 }, (_, i) => (
-                    <option key={i} value={i + 1}>
-                      {i + 1}.
-                    </option>
-                  ))}
-                </select>
-              </div>
-              {filtered ? (
-                <button
-                  className="link"
-                  onClick={() => {
-                    setText('');
-                    setStatus('all');
-                    setYear('');
-                    setMonth('');
-                    setDay('');
-                  }}
-                >
-                  Filter zurücksetzen
-                </button>
-              ) : null}
-            </div>
-          ) : null}
-          {shown.map((a) => (
-            <button className="card row" key={a.id} onClick={() => go(a.status === 'pending' ? `/join/${a.id}/${a.token}` : `/a/${a.id}`)}>
-              <span className="grow">
-                <strong>{a.title}</strong>
-                {a.topic ? <small>{a.topic}</small> : null}
-                <small>
-                  {date(a).toLocaleDateString('de-DE', { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric' })} · {STATUS_TEXT[a.status]}
-                </small>
-              </span>
-              <span className="chev">›</span>
-            </button>
-          ))}
-          {shown.length === 0 ? <p className="muted center">Nichts gefunden.</p> : null}
+          <h3 className="section">Geplant</h3>
+          {planned.map(row)}
         </>
       ) : null}
+
+      {running.length > 0 ? (
+        <>
+          <h3 className="section">Laufend</h3>
+          {running.slice(0, SHOW_RUNNING).map(row)}
+          {running.length > SHOW_RUNNING ? (
+            <details className="fold">
+              <summary>Weitere anzeigen ({running.length - SHOW_RUNNING})</summary>
+              <div>{running.slice(SHOW_RUNNING).map(row)}</div>
+            </details>
+          ) : null}
+        </>
+      ) : null}
+
+      {archive.length > 0 ? (
+        <details className="fold">
+          <summary>Abgeschlossen ({archive.length})</summary>
+          <div>
+            <div className="search">
+              <input type="search" value={text} onChange={(e) => setText(e.target.value)} placeholder="Suchen: Name, Person" aria-label="Abgeschlossene durchsuchen" />
+              <button className={`btn ${showFilter || filtered ? 'on' : ''}`} onClick={() => setShowFilter(!showFilter)} aria-expanded={showFilter}>
+                Filter
+              </button>
+            </div>
+            {showFilter ? (
+              <div className="card filters">
+                <div className="chips">
+                  {ARCHIVE_STATUS.map((s) => (
+                    <Chip key={s.id} on={status === s.id} onClick={() => setStatus(s.id)}>
+                      {s.name}
+                    </Chip>
+                  ))}
+                </div>
+                <div className="selects">
+                  <select value={year} onChange={(e) => setYear(e.target.value)} aria-label="Jahr">
+                    <option value="">Jahr</option>
+                    {years.map((y) => (
+                      <option key={y} value={y}>
+                        {y}
+                      </option>
+                    ))}
+                  </select>
+                  <select value={month} onChange={(e) => setMonth(e.target.value)} aria-label="Monat">
+                    <option value="">Monat</option>
+                    {MONTHS.map((m, i) => (
+                      <option key={m} value={i + 1}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                  <select value={day} onChange={(e) => setDay(e.target.value)} aria-label="Tag">
+                    <option value="">Tag</option>
+                    {Array.from({ length: 31 }, (_, i) => (
+                      <option key={i} value={i + 1}>
+                        {i + 1}.
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {filtered ? (
+                  <button
+                    className="link"
+                    onClick={() => {
+                      setText('');
+                      setStatus('all');
+                      setYear('');
+                      setMonth('');
+                      setDay('');
+                    }}
+                  >
+                    Filter zurücksetzen
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            {found.map(row)}
+            {found.length === 0 ? <p className="muted center">Nichts gefunden.</p> : null}
+          </div>
+        </details>
+      ) : null}
+
       {list != null && list.length === 0 ? (
         <p className="muted center">Noch keine Aktivität. Lege eine an oder öffne den Einladungslink deiner Freunde.</p>
       ) : null}
@@ -199,18 +261,10 @@ export function Home({ uid }: { uid: string }) {
   );
 }
 
-const DURATIONS = [
-  { id: 'today', name: 'Nur heute', days: 1 },
-  { id: 'evening', name: 'Ein Abend', days: 1 },
-  { id: 'weekend', name: 'Wochenende', days: 3 },
-  { id: 'days', name: 'Mehrere Tage', days: 7 },
-  { id: 'trip', name: 'Reise', days: 21 },
-];
 const ROUNDINGS: { id: string; name: string; step: number | null }[] = [
   { id: 'smart', name: 'Intelligent runden', step: null },
   { id: '100', name: 'Auf 1 € runden', step: 100 },
   { id: '50', name: 'Auf 0,50 € runden', step: 50 },
-  { id: '1', name: 'Centgenau', step: 1 },
 ];
 const TOLERANCES: { name: string; value: number | null }[] = [
   { name: 'passend zur Rundung', value: null },
@@ -219,57 +273,44 @@ const TOLERANCES: { name: string; value: number | null }[] = [
   { name: 'unter 5 €', value: 500 },
   { name: 'nichts ignorieren', value: 0 },
 ];
-const METHODS = [
-  { id: 'sepa_qr', name: 'QR-Code für Banküberweisung' },
-  { id: 'paypal', name: 'PayPal' },
-  { id: 'bank', name: 'Überweisungsdaten anzeigen' },
-  { id: 'later', name: 'Später entscheiden' },
-];
 
 export function Wizard({ uid }: { uid: string }) {
   const online = useOnline();
   const [step, setStep] = useState(0);
   const [myName, setMyName] = useState(localStorage.getItem('fair.name') ?? '');
-  const [duration, setDuration] = useState('today');
-  const [mode, setMode] = useState<Settings['mode']>('relaxed');
+  const [title, setTitle] = useState('');
+  const [from, setFrom] = useState(toInputDate(Date.now()));
+  const [multi, setMulti] = useState(false);
+  const [to, setTo] = useState(toInputDate(Date.now() + 86400000));
+  const [exact, setExact] = useState(false);
   const [rounding, setRounding] = useState<number | null>(null);
   const [tolerance, setTolerance] = useState<number | null>(null);
-  const [methods, setMethods] = useState<string[]>(['later']);
-  const [title, setTitle] = useState(new Date().toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'short' }));
-  const [topic, setTopic] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
-  const pickMode = (m: Settings['mode']) => {
-    setMode(m);
-    if (m === 'exact') {
-      setRounding(1);
-      setTolerance(0);
-    } else if (rounding === 1) {
-      setRounding(null);
-      setTolerance(null);
-    }
-  };
-  const toggleMethod = (id: string) => {
-    if (id === 'later') return setMethods(['later']);
-    const next = methods.filter((m) => m !== 'later');
-    setMethods(next.includes(id) ? next.filter((m) => m !== id) : [...next, id]);
-  };
-  const canNext = step !== 0 || myName.trim().length > 0;
+  const start = fromInputDate(from);
+  const endDay = multi ? fromInputDate(to) : start;
+  const datesOk = start != null && endDay != null && endDay >= start;
+  const canNext = myName.trim().length > 0 && title.trim().length > 0 && datesOk;
+  const kind = artFor({ title });
 
   const finish = async () => {
+    if (!datesOk || start == null || endDay == null) return;
     setBusy(true);
     setError('');
     try {
-      const days = DURATIONS.find((d) => d.id === duration)?.days ?? 1;
       const aid = await createActivity(uid, {
-        title: title.trim().slice(0, 60) || 'Unsere Kasse',
-        topic: topic.trim().slice(0, 60),
+        title: title.trim().slice(0, 60),
         myName: myName.trim().slice(0, 30),
-        others: [],
-        duration,
-        endsAt: Date.now() + days * 86400000,
-        settings: { mode, roundingStepCents: rounding, toleranceCents: tolerance, paymentMethods: methods, reminderDays: 3 },
+        startsAt: start,
+        endsAt: endOfDay(endDay),
+        settings: {
+          mode: exact ? 'exact' : 'relaxed',
+          roundingStepCents: exact ? 1 : rounding,
+          toleranceCents: exact ? 0 : tolerance,
+          paymentMethods: [],
+          reminderDays: 3,
+        },
       });
       go(`/a/${aid}`);
     } catch (e) {
@@ -280,69 +321,53 @@ export function Wizard({ uid }: { uid: string }) {
   };
 
   const steps = [
-    <section key="who">
+    <section key="who" className="stack">
       <h2>Los geht's</h2>
       <label className="field">
         <span>Dein Name</span>
-        <input value={myName} onChange={(e) => setMyName(e.target.value)} maxLength={30} autoComplete="given-name" autoFocus />
+        <input value={myName} onChange={(e) => setMyName(e.target.value)} maxLength={30} autoComplete="given-name" />
       </label>
       <label className="field">
-        <span>Name der Aktivität</span>
-        <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={60} />
+        <span>Was habt ihr vor?</span>
+        <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={60} placeholder="z. B. Schiffsausflug Bodensee" />
       </label>
-      <label className="field">
-        <span>Anlass (optional, hilft beim Wiederfinden)</span>
-        <input value={topic} onChange={(e) => setTopic(e.target.value)} maxLength={60} placeholder="z. B. Schiffsausflug, Birkenkopf" />
-      </label>
-      <p className="muted">Die anderen trägst du nicht ein: Am Ende bekommst du einen QR-Code. Wer ihn scannt, gibt selbst seinen Namen ein und ist dabei.</p>
-    </section>,
-    <section key="long">
-      <h2>Wie lange läuft eure gemeinsame Kasse?</h2>
-      <div className="tiles">
-        {DURATIONS.map((d) => (
-          <button key={d.id} className={`tile ${duration === d.id ? 'on' : ''}`} onClick={() => setDuration(d.id)}>
-            {d.name}
-          </button>
-        ))}
+      {title.trim() ? <Art kind={kind} className="wizard-art" /> : null}
+      <div className="field">
+        <span>Wann?</span>
+        <div className={multi ? 'date-row' : ''}>
+          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} aria-label={multi ? 'von' : 'Datum'} />
+          {multi ? <input type="date" value={to} min={from} onChange={(e) => setTo(e.target.value)} aria-label="bis" /> : null}
+        </div>
       </div>
+      <label className="switch">
+        <input type="checkbox" checked={multi} onChange={(e) => setMulti(e.target.checked)} />
+        <span>Mehrere Tage</span>
+      </label>
+      {!datesOk ? <p className="warn">Das Ende liegt vor dem Anfang.</p> : null}
+      <p className="muted">Die anderen trägst du nicht ein: Gleich bekommst du einen QR-Code. Wer ihn scannt, gibt selbst seinen Namen ein und ist dabei.</p>
     </section>,
-    <section key="mode">
-      <h2>Wie genau möchtet ihr abrechnen?</h2>
+    <section key="how" className="stack">
+      <h2>Wie rechnen wir?</h2>
       <div className="tiles one">
-        {MODES.map((m) => (
-          <button key={m.id} className={`tile ${mode === m.id ? 'on' : ''}`} onClick={() => pickMode(m.id)}>
-            <strong>
-              {m.name}
-              {m.id === 'relaxed' ? ' · empfohlen' : ''}
-            </strong>
-            <small>{m.text}</small>
-          </button>
-        ))}
+        <button className={`tile ${!exact ? 'on' : ''}`} onClick={() => setExact(false)}>
+          <strong>Ungefähr · empfohlen</strong>
+          <small>Größere Unterschiede gleichen wir aus, Kleinigkeiten lassen wir liegen. Gerundet wird auf glatte Beträge.</small>
+        </button>
+        <button className={`tile ${exact ? 'on' : ''}`} onClick={() => setExact(true)}>
+          <strong>Centgenau</strong>
+          <small>Jeder Cent wird ausgeglichen.</small>
+        </button>
       </div>
-      <details className="hint">
-        <summary>Was heißt hier „fair“?</summary>
-        <p>{FAIR_TEXT}</p>
-      </details>
-    </section>,
-    <section key="round">
-      <h2>Wie behandeln wir kleine Unterschiede?</h2>
-      <div className="tiles">
-        {ROUNDINGS.map((r) => (
-          <button
-            key={r.id}
-            className={`tile ${rounding === r.step ? 'on' : ''}`}
-            onClick={() => {
-              setRounding(r.step);
-              if (r.step === 1) setTolerance(0);
-              else if (tolerance === 0) setTolerance(null);
-            }}
-          >
-            {r.name}
-          </button>
-        ))}
-      </div>
-      {rounding !== 1 ? (
-        <>
+      {!exact ? (
+        <details className="hint">
+          <summary>Rundung anpassen</summary>
+          <div className="chips">
+            {ROUNDINGS.map((r) => (
+              <Chip key={r.id} on={rounding === r.step} onClick={() => setRounding(r.step)}>
+                {r.name}
+              </Chip>
+            ))}
+          </div>
           <h3>Kleine Beträge nicht ausgleichen</h3>
           <div className="chips">
             {TOLERANCES.map((t) => (
@@ -351,37 +376,14 @@ export function Wizard({ uid }: { uid: string }) {
               </Chip>
             ))}
           </div>
-        </>
+          <p className="muted">{rounding == null ? 'Intelligent: Beim Ausgleich schlägt die App eine Rundung vor, die zu euren Beträgen passt.' : roundingText(rounding, tolerance)}</p>
+        </details>
       ) : null}
-      <p className="muted">
-        {rounding == null
-          ? 'Intelligent: Beim Kassensturz schlägt die App eine Rundung vor, die zu euren Beträgen passt.'
-          : roundingText(rounding, tolerance)}
-      </p>
-    </section>,
-    <section key="pay">
-      <h2>Wie möchtet ihr am Ende bezahlen?</h2>
-      <div className="tiles one">
-        {METHODS.map((m) => (
-          <button key={m.id} className={`tile ${methods.includes(m.id) ? 'on' : ''}`} onClick={() => toggleMethod(m.id)}>
-            {m.name}
-          </button>
-        ))}
-      </div>
-      <p className="muted">Mehrere sind möglich. Ihr könnt das beim Kassensturz noch ändern.</p>
-    </section>,
-    <section key="sum">
-      <h2>So rechnen wir</h2>
-      <div className="card summary">
-        <p>
-          <strong>{title.trim() || 'Unsere Kasse'}</strong>
-        </p>
-        {topic.trim() ? <p>Anlass: {topic.trim()}</p> : null}
-        <p>{DURATIONS.find((d) => d.id === duration)?.name}</p>
-        <p>Modus: {modeName(mode)}</p>
-        <p>{roundingText(rounding, tolerance)}</p>
-        <p>Zahlen und Bestätigen innerhalb von 3 Tagen nach dem Kassensturz</p>
-      </div>
+      <details className="hint">
+        <summary>Was heißt hier „fair“?</summary>
+        <p>{FAIR_TEXT}</p>
+      </details>
+      <p className="muted">Wer bei einer Ausgabe mehr oder weniger dabei war (z. B. doppelte Portion), lässt sich dort jederzeit unter „Anteile anpassen“ einstellen.</p>
       {!online ? <p className="warn">Zum Anlegen brauchst du kurz Internet.</p> : null}
       {error ? <p className="warn">{error}</p> : null}
     </section>,
@@ -403,11 +405,7 @@ export function Wizard({ uid }: { uid: string }) {
           </button>
         ) : null}
         {step < steps.length - 1 ? (
-          <button
-            className="btn primary grow"
-            disabled={!canNext}
-            onClick={() => setStep(step + 1)}
-          >
+          <button className="btn primary grow" disabled={!canNext} onClick={() => setStep(step + 1)}>
             Weiter
           </button>
         ) : (
@@ -420,7 +418,6 @@ export function Wizard({ uid }: { uid: string }) {
   );
 }
 
-/** Beitreten per Einladungslink: Anfrage stellen, auf Zustimmung aller warten, dann eintreten. */
 export function Join({ uid, aid, token }: { uid: string; aid: string; token: string }) {
   const online = useOnline();
   const request = useMyRequest(aid, uid);
@@ -446,8 +443,7 @@ export function Join({ uid, aid, token }: { uid: string; aid: string; token: str
   useEffect(() => {
     if (request?.status !== 'approved') return;
     completeJoin(uid, aid)
-      .then(() => enterAs(aid, uid, request.name))
-      .then(() => go(`/a/${aid}`))
+      .then(() => setStage({ kind: 'name', initial: request.name }))
       .catch((e) => {
         console.error(e);
         setError('Die Zustimmung ist da, aber der Beitritt hat noch nicht geklappt. Bitte gleich noch einmal öffnen.');
@@ -458,23 +454,36 @@ export function Join({ uid, aid, token }: { uid: string; aid: string; token: str
   useEffect(() => {
     if (request?.status !== 'pending' || busy) return;
     completeJoin(uid, aid)
-      .then(() => enterAs(aid, uid, request.name))
-      .then(() => go(`/a/${aid}`))
+      .then(() => setStage({ kind: 'name', initial: request.name }))
       .catch(() => undefined);
   }, [request?.status, uid, aid]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const [stage, setStage] = useState<null | { kind: 'name'; initial: string } | { kind: 'payee'; memberId: string }>(null);
 
   const send = async () => {
     setBusy(true);
     setError('');
     try {
       const clean = name.trim().slice(0, 30);
-      if (await joinNow(uid, aid, token, clean, invite?.title ?? 'Aktivität')) return go(`/a/${aid}`);
+      if (await joinNow(uid, aid, token, clean, invite?.title ?? 'Aktivität')) return setStage({ kind: 'name', initial: clean });
     } catch (e) {
       console.error(e);
       setError('Das hat nicht geklappt. Bitte prüfe die Internetverbindung.');
     }
     setBusy(false);
   };
+
+  if (stage)
+    return (
+      <main>
+        <Header title={invite?.title ?? 'Beitreten'} back={''} />
+        {stage.kind === 'name' ? (
+          <NameStep aid={aid} uid={uid} initial={stage.initial} auto onDone={(memberId) => setStage({ kind: 'payee', memberId })} />
+        ) : (
+          <PayeeStep aid={aid} memberId={stage.memberId} onDone={() => go(`/a/${aid}`)} />
+        )}
+      </main>
+    );
 
   return (
     <main>

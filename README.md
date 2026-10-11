@@ -71,11 +71,11 @@ npm run test:rules  # Zugriffsregeln gegen den Firestore-Emulator (braucht Java)
 
 | Pfad | Inhalt |
 | --- | --- |
-| `src/core/settle.ts` | Kassensturz: Anteile, Salden, Toleranz, möglichst wenige Zahlungen, faire Rundung |
+| `src/core/settle.ts` | Ausgleich: Anteile, Salden, Toleranz, möglichst wenige Zahlungen, faire Rundung |
 | `src/core/pay.ts` | SEPA-QR-Text (EPC069-12, Version 002), IBAN-Prüfung, PayPal.Me-Link |
 | `src/store.ts` | Firebase: Anmeldung, Lesen und Schreiben, Offline-Speicher |
 | `src/store.demo.ts` | Ersatz für den Demo-Modus |
-| `src/screens/` | Start, Wizard, Beitreten, Aktivität, Details, Kassensturz, Zahlung |
+| `src/screens/` | Start, Wizard, Beitreten, Aktivität, Details, Ausgleich, Zahlung |
 | `firestore.rules` | Zugriffsregeln: nur Mitglieder einer Aktivität |
 | `tests/rules.test.ts` | Tests der Zugriffsregeln |
 
@@ -87,10 +87,10 @@ npm run test:rules  # Zugriffsregeln gegen den Firestore-Emulator (braucht Java)
 - Jede Aktivität sehen nur ihre Mitglieder. Eine frühere gemeinsame Aktivität gibt keinen Zugriff auf spätere.
 - Ausgaben erfassen („für alle“, „geht auf mich“, Anteile); auf jedem Gerät ist „Ich“ als Zahler vorausgewählt
 - **Mitlernende Vorschläge** für „Wofür?“ (10 Knöpfe): zuerst Begriffe dieser Aktivität, dann passend zum Anlass (z. B. Schiff → Schiffsticket, Bordrestaurant), dann eigene Lieblingsbegriffe, dann Grundbegriffe; beim Tippen wird gefiltert
-- **12 Stunden** lang frei korrigierbar; danach und nach dem Kassensturz nur mit **Begründung**, die alle im Verlauf und im Druck sehen
-- Kassensturz mit möglichst wenigen Zahlungen und Rundungsprotokoll
+- **12 Stunden** lang frei korrigierbar; danach und nach dem Ausgleich nur mit **Begründung**, die alle im Verlauf und im Druck sehen
+- Ausgleich mit möglichst wenigen Zahlungen und Rundungsprotokoll
 - **Zahlungen zweistufig:** Der Zahler meldet „überwiesen“ oder „bar gegeben“, **nur der Empfänger** bestätigt „erhalten“. Ohne Bestätigung abschließen geht nur mit Begründung; beide sehen einen Hinweis.
-- **Nachausgleich:** Korrekturen nach dem Kassensturz verändern erledigte Zahlungen nicht; die Differenz wird zusätzlich verrechnet.
+- **Nachausgleich:** Korrekturen nach dem Ausgleich verändern erledigte Zahlungen nicht; die Differenz wird zusätzlich verrechnet.
 - **Erinnerungen** beim Öffnen der App: freundlicher Hinweis zum Zahlen bzw. Bestätigen (Frist einstellbar, Standard 3 Tage) und zu offenen Beitrittsanfragen
 - **Bezahlen mit nur einem Handy:** Empfänger, IBAN, Betrag und Zweck einzeln kopieren; „Als Bild speichern“ legt QR-Code und Angaben als Bild ab (zum Hochladen bei „Fotoüberweisung“). Am Computer steht der QR-Code oben.
 - SEPA-QR-Code, Überweisungsdaten, **PayPal**: Knopf öffnet die PayPal-App mit Betrag, zusätzlich QR-Code mit demselben Link
@@ -104,4 +104,4 @@ Bekannte Grenzen:
 - Wer die Browserdaten löscht oder das Handy wechselt, bekommt eine neue anonyme Kennung und muss den Beitritt neu anfragen. Seinen alten Namen kann er dann nicht wieder übernehmen; das verhindert, dass jemand fremde Namen übernimmt. Abhilfe kommt mit dem optionalen E-Mail-Konto.
 - Die App erfährt nicht von Bank oder PayPal, ob gezahlt wurde; dafür gibt es die Bestätigung durch den Empfänger.
 - IBAN und PayPal-Name sind für alle Mitglieder der Aktivität lesbar und nicht zusätzlich verschlüsselt.
-- Der Kassensturz wird auf den Geräten berechnet, nicht auf einem Server nachgerechnet. Jede Zahlung und Änderung ist aber für alle sichtbar.
+- Der Ausgleich wird auf den Geräten berechnet, nicht auf einem Server nachgerechnet. Jede Zahlung und Änderung ist aber für alle sichtbar.

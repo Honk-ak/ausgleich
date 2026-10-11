@@ -2,11 +2,11 @@ import { useEffect, useMemo, useState } from 'react';
 import { euro, parseAmount } from '../core/pay';
 import { exitPlan, settle, SettlementOut } from '../core/settle';
 import { remindersFor, shouldPopup, unseen } from '../reminders';
-import { buildSuggestions, personalLabels, rememberLabel } from '../suggestions';
+import { Art, ART_KINDS, artFor } from '../art';
+import { buildSuggestions, personalLabels, rememberLabel, themeKey } from '../suggestions';
 import {
   Activity,
   ActivityData,
-  addSelf,
   approveRequest,
   claimMember,
   countedTransfers,
@@ -21,8 +21,12 @@ import {
   leaveWithSettlement,
   Member,
   rejectRequest,
+  rememberedPayee,
   removeMember,
+  renameMember,
   requestName,
+  sameName,
+  savePayee,
   saveExpense,
   setExpenseDeleted,
   setJoinOpen,
@@ -31,7 +35,32 @@ import {
   useActivity,
   useOnline,
 } from '../store';
-import { Avatar, Backdrop, Brand, Chip, CountUp, FAIR_TEXT, go, Header, PlusIcon, inviteLink, MODES, modeName, Qr, roundingText, share, Sheet, time } from '../ui';
+import {
+  Avatar,
+  Backdrop,
+  Brand,
+  Chip,
+  CountUp,
+  dateRange,
+  endOfDay,
+  FAIR_TEXT,
+  fromInputDate,
+  go,
+  Header,
+  PlusIcon,
+  inviteLink,
+  MODES,
+  modeName,
+  Qr,
+  roundingText,
+  share,
+  Sheet,
+  startOfDay,
+  time,
+  toInputDate,
+} from '../ui';
+import { NameStep } from './Onboard';
+import { PayeeForm, payeeSummary } from './PayeeForm';
 import { Report } from './Report';
 import { Settle } from './Settle';
 import { ReminderPopup } from './Start';
@@ -45,7 +74,7 @@ export interface Ctx {
   me: Member;
   result: SettlementOut;
   byId: Record<string, Member>;
-  /** Kassensturz bestätigt, aber seitdem wurden Ausgaben korrigiert */
+  /** Ausgleich vereinbart, aber seitdem wurden Ausgaben korrigiert */
   changed: boolean;
 }
 
@@ -61,7 +90,7 @@ export function ActivityScreen({ uid, aid, view }: { uid: string; aid: string; v
     () => settle(aid, memberIds, expenses, settings, countedTransfers(data.payments, false), frozen),
     [aid, members, expenses, activity, data.payments], // eslint-disable-line react-hooks/exhaustive-deps
   );
-  // Nach dem Kassensturz: bereits gezahlte Beträge bleiben, nur die Differenz wird neu verteilt
+  // Nach dem Ausgleich: bereits gezahlte Beträge bleiben, nur die Differenz wird neu verteilt
   const result = useMemo(
     () => (data.settlement ? settle(aid, memberIds, expenses, settings, countedTransfers(data.payments, true), frozen) : plain),
     [plain, data.settlement, data.payments], // eslint-disable-line react-hooks/exhaustive-deps
@@ -74,7 +103,7 @@ export function ActivityScreen({ uid, aid, view }: { uid: string; aid: string; v
     activity?.status !== 'open' && !changed && data.payments.length > 0 && data.payments.every((p) => p.status === 'received' || p.status === 'closed');
   useEffect(() => {
     if (!activity || !me) return;
-    if (activity.status === 'settled' && finished) updateActivity(aid, { status: 'done' });
+    if (activity.status === 'settled' && finished) updateActivity(aid, { status: 'done', doneAt: Date.now() });
     if (activity.status === 'done' && changed) updateActivity(aid, { status: 'settled' });
     syncMyCopy(uid, activity, members.map((m) => m.name), activity.status);
   }, [activity, me, finished, changed, members, aid, uid]);
@@ -117,17 +146,16 @@ export function ActivityScreen({ uid, aid, view }: { uid: string; aid: string; v
   );
 }
 
-/** Nach genehmigtem Beitritt: freien Namen übernehmen oder sich neu eintragen. */
+/** Mitglied, aber noch ohne Namen in der Liste (z. B. App zwischendurch geschlossen): Namen eintragen. */
 function WhoAreYou({ uid, aid, title, members }: { uid: string; aid: string; title: string; members: Member[] }) {
-  const [name, setName] = useState(localStorage.getItem('fair.name') ?? '');
   const free = members.filter((m) => !m.uid && !m.leftAt);
   return (
     <main>
       <Header title={title} back={''} />
-      <h2>Willkommen! Wer bist du?</h2>
+      <h2>Willkommen!</h2>
       {free.length > 0 ? (
         <>
-          <p className="muted">Wenn die Gruppe dich schon eingetragen hat, tippe deinen Namen an.</p>
+          <p className="muted">Hat dich die Gruppe schon eingetragen? Dann tippe deinen Namen an.</p>
           <div className="tiles">
             {free.map((m) => (
               <button
@@ -142,22 +170,10 @@ function WhoAreYou({ uid, aid, title, members }: { uid: string; aid: string; tit
               </button>
             ))}
           </div>
-          <h3>Mein Name fehlt</h3>
+          <h3>Sonst:</h3>
         </>
       ) : null}
-      <div className="inline">
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Dein Name" maxLength={30} />
-        <button
-          className="btn primary"
-          disabled={!name.trim()}
-          onClick={() => {
-            localStorage.setItem('fair.name', name.trim());
-            addSelf(aid, uid, name.trim().slice(0, 30), members.length);
-          }}
-        >
-          Dabei
-        </button>
-      </div>
+      <NameStep aid={aid} uid={uid} initial={localStorage.getItem('fair.name') ?? ''} onDone={() => undefined} />
     </main>
   );
 }
@@ -197,15 +213,41 @@ function Main(ctx: Ctx) {
   const [sheet, setSheet] = useState<null | 'new' | 'all'>(null);
   const [standing, setStanding] = useState(false);
   const [toast, setToast] = useState('');
-  const settled = activity.status !== 'open';
+  const cancelled = activity.status === 'cancelled';
+  const settled = activity.status === 'settled' || activity.status === 'done';
+  const closed = settled || cancelled;
+  const owner = activity.createdBy === uid;
   const step = Math.max(result.stepCents, 100);
+  const now = Date.now();
+  const end = activity.endsAt ?? endOfDay(activity.startsAt);
+  const isToday = activity.startsAt <= endOfDay(now) && end >= startOfDay(now);
+  const planned = activity.startsAt > endOfDay(now);
+  const over = !closed && now > end && data.expenses.length > 0;
+  const helloKey = `fair.hello.${aid}`;
+  const [hello, setHello] = useState(() => {
+    try {
+      return isToday && !closed && localStorage.getItem(helloKey) !== toInputDate(now);
+    } catch {
+      return false;
+    }
+  });
+  const skipKey = `fair.payee.skip.${aid}`;
+  const [payeeAsk, setPayeeAsk] = useState(() => {
+    try {
+      return !localStorage.getItem(skipKey);
+    } catch {
+      return true;
+    }
+  });
+  const [payeeSheet, setPayeeSheet] = useState(false);
   const pending = data.requests.filter((r) => r.status === 'pending' && !(r.uid && activity.memberUids.includes(r.uid)));
   const active = data.members.filter(isActive);
   // Ausgeschiedene bleiben sichtbar, wenn sie etwas übernommen haben (Nachvollziehbarkeit)
   const shown = data.members.filter((m) => isActive(m) || isInvolved(m.id, data.expenses));
   const exits = data.payments.filter((p) => p.kind === 'exit');
   const exitsDone = exits.filter((p) => p.status === 'received' || p.status === 'closed').length;
-  const doorOpen = !!activity.joinOpen && !settled;
+  const doorOpen = !!activity.joinOpen && !closed;
+  const showPayeeAsk = payeeAsk && !cancelled && !me.leftAt && !data.payees[me.id] && data.members.filter(isActive).length >= 2;
   const gone = !!me.leftAt;
   const reminders = unseen(remindersFor({ aid, title: activity.title, uid, myMemberId: me.id, members: data.members, payments: data.payments, requests: data.requests }));
   const [popup, setPopup] = useState(false);
@@ -236,7 +278,71 @@ function Main(ctx: Ctx) {
       {!gone && pending.map((r) => (
         <RequestCard key={r.id} ctx={ctx} req={r} />
       ))}
+      {cancelled ? (
+        <div className="card warn-card">
+          <p>
+            <strong>Abgesagt</strong>
+            {activity.doneAt ? ` am ${time(activity.doneAt)}` : ''}. Es gab keine Ausgaben, also ist nichts auszugleichen.
+          </p>
+          {owner ? (
+            <button className="btn" onClick={() => updateActivity(aid, { status: 'open', doneAt: null })}>
+              Doch stattfinden lassen
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {hello && !gone ? (
+        <div className="card hello pop">
+          <p>
+            <strong>Heute geht's los!</strong> Tragt Ausgaben am besten gleich ein, dann ist der Ausgleich am Ende schnell gemacht.
+          </p>
+          <button
+            className="icon-btn"
+            aria-label="Ausblenden"
+            onClick={() => {
+              try {
+                localStorage.setItem(helloKey, toInputDate(Date.now()));
+              } catch {
+                /* egal */
+              }
+              setHello(false);
+            }}
+          >
+            ×
+          </button>
+        </div>
+      ) : null}
+      {over && !gone ? (
+        <button className="card settled-strip" onClick={() => go(`/a/${aid}/settle`)}>
+          Laut Plan vorbei. Ausgleich ansehen ›
+        </button>
+      ) : null}
       {doorOpen && !gone && active.length < 2 ? <InviteCard ctx={ctx} /> : null}
+      {showPayeeAsk ? (
+        <div className="card">
+          <p>
+            <strong>Wie möchtest du später Geld bekommen?</strong> Falls dir am Ende jemand etwas zurückgibt.
+          </p>
+          <div className="bar">
+            <button
+              className="btn"
+              onClick={() => {
+                try {
+                  localStorage.setItem(skipKey, '1');
+                } catch {
+                  /* egal */
+                }
+                setPayeeAsk(false);
+              }}
+            >
+              Später
+            </button>
+            <button className="btn primary grow" onClick={() => setPayeeSheet(true)}>
+              Festlegen
+            </button>
+          </div>
+        </div>
+      ) : null}
       {exits.length > 0 && !settled ? (
         <button className="card settled-strip" onClick={() => go(`/a/${aid}/settle`)}>
           Teilausgleich · {exitsDone} von {exits.length} {exits.length === 1 ? 'Zahlung' : 'Zahlungen'} erledigt ›
@@ -245,17 +351,19 @@ function Main(ctx: Ctx) {
       {settled ? (
         <button className="card settled-strip" onClick={() => go(`/a/${aid}/settle`)}>
           {ctx.changed
-            ? 'Nach dem Kassensturz wurde etwas korrigiert. Nachausgleich ansehen ›'
+            ? 'Nach dem Ausgleich wurde etwas korrigiert. Nachausgleich ansehen ›'
             : activity.status === 'done'
               ? 'Alles ausgeglichen. ›'
-              : `Kassensturz gemacht · ${doneCount} von ${data.payments.length} Zahlungen erledigt ›`}
+              : `Ausgleich vereinbart · ${doneCount} von ${data.payments.length} Zahlungen erledigt ›`}
         </button>
       ) : null}
       <div className="card hero-card pop">
+        <Art kind={artFor(activity)} />
         <small className="hero-title">
           {activity.title}
-          {activity.topic ? ` · ${activity.topic}` : ''}
+          {activity.topic && activity.topic !== activity.title ? ` · ${activity.topic}` : ''}
         </small>
+        <small className="muted">{planned ? `Geplant für ${dateRange(activity.startsAt, activity.endsAt)}` : dateRange(activity.startsAt, activity.endsAt)}</small>
         <strong className="hero-total">
           <CountUp cents={result.totalCents} />
         </strong>
@@ -285,7 +393,7 @@ function Main(ctx: Ctx) {
         })}
       </div>
       <div className="links">
-        {!settled ? (
+        {!closed ? (
           <button className="link" onClick={() => setStanding(!standing)}>
             {standing ? 'Zwischenstand ausblenden' : 'Zwischenstand ansehen'}
           </button>
@@ -301,13 +409,13 @@ function Main(ctx: Ctx) {
           Gruppe ist offen · weitere Personen einladen ›
         </button>
       ) : null}
-      {!settled && !gone ? (
+      {!closed && !gone ? (
         <button className="btn wide" onClick={() => go(`/a/${aid}/settle`)}>
-          Kassensturz
+          Ausgleich ansehen
         </button>
       ) : null}
       {toast ? <p className="toast">{toast}</p> : null}
-      {gone ? null : <div className="dock">
+      {gone || cancelled ? null : <div className="dock">
         <button className="btn primary grow big" onClick={() => setSheet('new')}>
           <PlusIcon /> Ausgabe
         </button>
@@ -332,6 +440,20 @@ function Main(ctx: Ctx) {
         />
       ) : null}
       {popup ? <ReminderPopup items={reminders} onClose={() => setPopup(false)} /> : null}
+      {payeeSheet ? (
+        <Sheet title="Wie möchtest du Geld bekommen?" onClose={() => setPayeeSheet(false)}>
+          <PayeeForm
+            name={me.name}
+            self
+            initial={data.payees[me.id] ?? rememberedPayee()}
+            onSave={(p) => {
+              savePayee(aid, me.id, p, true);
+              setPayeeSheet(false);
+              setPayeeAsk(false);
+            }}
+          />
+        </Sheet>
+      ) : null}
     </main>
   );
 }
@@ -375,7 +497,7 @@ function expenseSummary(e: { label: string; amountCents: number }, payer: string
   return `${e.label}, ${euro(e.amountCents, true)}, bezahlt von ${payer}`.slice(0, 200);
 }
 
-/** Braucht diese Änderung eine Begründung? (nach dem Kassensturz oder später als 12 Stunden nach dem Eintragen) */
+/** Braucht diese Änderung eine Begründung? (nach dem Ausgleich oder später als 12 Stunden nach dem Eintragen) */
 export function needsReason(activity: Activity, existing: Expense | null): boolean {
   if (activity.status !== 'open') return true;
   return existing != null && Date.now() - existing.createdAt > EDIT_WINDOW_MS;
@@ -384,7 +506,6 @@ export function needsReason(activity: Activity, existing: Expense | null): boole
 export function ExpenseSheet(props: { ctx: Ctx; existing: Expense | null; quick: boolean; onClose: (message?: string) => void }) {
   const { ctx, existing } = props;
   const { data, activity, me, aid, uid, byId } = ctx;
-  const weighted = activity.settings.mode !== 'relaxed';
   // Wählbar: wer noch dabei ist, plus wer in dieser Ausgabe schon vorkommt
   const pickable = data.members.filter(
     (m) => isActive(m) || (existing != null && (existing.payerId === m.id || existing.participants.some((p) => p.memberId === m.id))),
@@ -403,7 +524,10 @@ export function ExpenseSheet(props: { ctx: Ctx; existing: Expense | null; quick:
   const reasonNeeded = needsReason(activity, existing);
   const reasonOk = !reasonNeeded || reason.trim().length >= 5;
 
-  const [personal] = useState(personalLabels);
+  const topicKey = themeKey(`${activity.title} ${activity.topic ?? ''}`);
+  const [personal] = useState(() => personalLabels(topicKey));
+  // „Anteile anpassen“: doppelt oder halb zählen; automatisch an, wenn die Ausgabe schon so gespeichert ist
+  const [adjust, setAdjust] = useState(() => existing?.participants.some((p) => p.weight !== 1) ?? false);
   const suggestions = useMemo(() => {
     const base = {
       activityLabels: [...data.expenses].sort((a, b) => a.spentAt - b.spentAt).map((e) => e.label),
@@ -421,7 +545,8 @@ export function ExpenseSheet(props: { ctx: Ctx; existing: Expense | null; quick:
   const valid = cents != null && label.trim().length > 0 && (treat || selected.length > 0) && reasonOk;
   const tap = (id: string) => {
     const w = weights[id] ?? 0;
-    const next = weighted ? (w === 0 ? 1 : w === 1 ? 2 : w === 2 ? 0.5 : 0) : w > 0 ? 0 : 1;
+    // normal: an/aus. Beim Anpassen: normal → doppelt → halb → nicht dabei
+    const next = adjust ? (w === 0 ? 1 : w === 1 ? 2 : w === 2 ? 0.5 : 0) : w > 0 ? 0 : 1;
     setWeights({ ...weights, [id]: next });
   };
   const weightMark = (w: number) => (w === 2 ? ' ×2' : w === 0.5 ? ' ½' : '');
@@ -443,7 +568,7 @@ export function ExpenseSheet(props: { ctx: Ctx; existing: Expense | null; quick:
       source: (allOn && props.quick ? 'quick_all' : 'manual') as Expense['source'],
     };
     saveExpense(aid, uid, me.name, input, existing, expenseSummary(input, byId[payer]?.name ?? '?'), why);
-    if (!existing) rememberLabel(clean);
+    if (!existing) rememberLabel(clean, topicKey);
     const who = payer === me.id ? 'Du hast' : `${byId[payer]?.name} hat`;
     props.onClose(existing ? 'Gespeichert.' : `${who} ${euro(cents)} für ${clean} übernommen`);
   };
@@ -453,7 +578,7 @@ export function ExpenseSheet(props: { ctx: Ctx; existing: Expense | null; quick:
       {reasonNeeded ? (
         <p className="warn">
           {activity.status !== 'open'
-            ? 'Der Kassensturz ist schon gemacht. Änderungen sind möglich, brauchen aber eine kurze Begründung und werden für alle sichtbar festgehalten. Bereits erledigte Zahlungen bleiben bestehen; die Differenz wird als Nachausgleich verrechnet.'
+            ? 'Der Ausgleich ist schon vereinbart. Änderungen sind möglich, brauchen aber eine kurze Begründung und werden für alle sichtbar festgehalten. Bereits erledigte Zahlungen bleiben bestehen; die Differenz wird als Nachausgleich verrechnet.'
             : 'Diese Ausgabe ist älter als 12 Stunden. Änderungen brauchen jetzt eine kurze Begründung, die alle sehen.'}
         </p>
       ) : null}
@@ -498,7 +623,13 @@ export function ExpenseSheet(props: { ctx: Ctx; existing: Expense | null; quick:
               </Chip>
             ))}
           </div>
-          {weighted ? <p className="muted">Mehrmals antippen: normal → doppelter Anteil → halber Anteil → nicht dabei.</p> : null}
+          {adjust ? (
+            <p className="muted">Mehrmals antippen: normal → doppelter Anteil (×2) → halber Anteil (½) → nicht dabei.</p>
+          ) : (
+            <button className="link quiet" onClick={() => setAdjust(true)}>
+              Anteile anpassen (z. B. doppelte Portion)
+            </button>
+          )}
         </>
       ) : null}
       <label className="switch">
@@ -642,14 +773,27 @@ function Info(ctx: Ctx) {
   const { activity, aid, data, uid, me } = ctx;
   const [note, setNote] = useState('');
   const [name, setName] = useState('');
-  const [topic, setTopic] = useState(activity.topic ?? '');
+  const [title, setTitle] = useState(activity.title);
+  const [from, setFrom] = useState(toInputDate(activity.startsAt));
+  const [to, setTo] = useState(toInputDate(activity.endsAt ?? activity.startsAt));
+  const [myName, setMyName] = useState(me.name);
+  const [nameNote, setNameNote] = useState('');
   const [leaving, setLeaving] = useState<Member | null>(null);
+  const [payeeSheet, setPayeeSheet] = useState(false);
+  const [cancelSheet, setCancelSheet] = useState(false);
   const active = data.members.filter(isActive);
   const everything = [...data.expenses, ...data.deleted];
   const owner = activity.createdBy === uid;
   const s = activity.settings;
   const days = s.reminderDays ?? 3;
   const open = activity.status === 'open';
+  const fromMs = fromInputDate(from);
+  const toMs = fromInputDate(to);
+  const datesOk = fromMs != null && toMs != null && toMs >= fromMs;
+  const datesChanged = datesOk && (fromMs !== startOfDay(activity.startsAt) || endOfDay(toMs!) !== (activity.endsAt ?? endOfDay(activity.startsAt)));
+  const taken = (n: string, except?: string) => data.members.some((m) => isActive(m) && m.id !== except && sameName(m.name, n));
+  const canCancel = owner && open && data.expenses.length === 0 && data.payments.length === 0;
+  const myPayee = data.payees[me.id];
   return (
     <main>
       <Header title="So rechnen wir" back={`/a/${aid}`} />
@@ -657,23 +801,81 @@ function Info(ctx: Ctx) {
         <p>
           <strong>{activity.title}</strong>
         </p>
-        {activity.topic ? <p>Anlass: {activity.topic}</p> : null}
+        {activity.topic && activity.topic !== activity.title ? <p>Anlass: {activity.topic}</p> : null}
+        <p>{dateRange(activity.startsAt, activity.endsAt)}</p>
         <p>{active.length} Personen</p>
         <p>Modus: {modeName(s.mode)}</p>
         <p>{roundingText(s.roundingStepCents, s.toleranceCents)}</p>
-        <p>Zahlen und Bestätigen innerhalb von {days} {days === 1 ? 'Tag' : 'Tagen'} nach dem Kassensturz</p>
+        <p>Zahlen und Bestätigen innerhalb von {days} {days === 1 ? 'Tag' : 'Tagen'} nach dem Ausgleich</p>
         <p>Ausgaben lassen sich 12 Stunden lang frei korrigieren, danach nur mit Begründung.</p>
       </div>
       <p className="fair">{FAIR_TEXT}</p>
+      {!me.leftAt ? (
+        <>
+          <h3>Dein Name</h3>
+          <div className="inline">
+            <input value={myName} onChange={(e) => setMyName(e.target.value)} maxLength={30} />
+            <button
+              className="btn"
+              disabled={!myName.trim() || myName.trim() === me.name}
+              onClick={() => {
+                const n = myName.trim().slice(0, 30);
+                if (taken(n, me.id)) return setNameNote(`Einen „${n}“ gibt es schon. Bitte mit Zusatz, z. B. „${n} B.“`);
+                renameMember(aid, me.id, n);
+                setNameNote('Gespeichert.');
+              }}
+            >
+              Ändern
+            </button>
+          </div>
+          {nameNote ? <p className="muted">{nameNote}</p> : null}
+          <h3>Dein Zahlungsweg</h3>
+          <button className="card row" onClick={() => setPayeeSheet(true)}>
+            <span className="grow">{myPayee ? payeeSummary(myPayee) : 'Noch nicht festgelegt'}</span>
+            <span className="chev">›</span>
+          </button>
+        </>
+      ) : null}
       {owner ? (
         <>
-          <h3>Anlass</h3>
+          <h3>Was habt ihr vor?</h3>
           <div className="inline">
-            <input value={topic} onChange={(e) => setTopic(e.target.value)} maxLength={60} placeholder="z. B. Schiffsausflug" />
-            <button className="btn" disabled={topic.trim() === (activity.topic ?? '')} onClick={() => updateActivity(aid, { topic: topic.trim() })}>
+            <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={60} />
+            <button className="btn" disabled={!title.trim() || title.trim() === activity.title} onClick={() => updateActivity(aid, { title: title.trim() })}>
               Speichern
             </button>
           </div>
+          <h3>Wann?</h3>
+          <div className="date-row">
+            <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} aria-label="von" />
+            <input type="date" value={to} min={from} onChange={(e) => setTo(e.target.value)} aria-label="bis" />
+          </div>
+          {!datesOk ? <p className="warn">Das Ende liegt vor dem Anfang.</p> : null}
+          {datesChanged ? (
+            <button className="btn" onClick={() => updateActivity(aid, { startsAt: fromMs!, endsAt: endOfDay(toMs!) })}>
+              Termin speichern
+            </button>
+          ) : null}
+          <h3>Bild</h3>
+          <div className="art-pick">
+            {[...ART_KINDS, { key: 'none', name: 'Kein Bild' }].map((k) => {
+              const current = activity.picture || '';
+              const on = current === k.key || (!current && artFor({ title: activity.title, topic: activity.topic }) === k.key);
+              return (
+                <button key={k.key} className={on ? 'on' : ''} onClick={() => updateActivity(aid, { picture: k.key })} aria-pressed={on}>
+                  {k.key === 'none' ? <span className="none">–</span> : <Art kind={k.key} />}
+                  {k.name}
+                </button>
+              );
+            })}
+          </div>
+          {activity.picture ? (
+            <button className="link quiet" onClick={() => updateActivity(aid, { picture: '' })}>
+              Wieder automatisch passend zum Namen
+            </button>
+          ) : (
+            <p className="muted">Das Bild wird automatisch passend zum Namen gewählt.</p>
+          )}
           <h3>Frist zum Zahlen und Bestätigen</h3>
           <div className="chips">
             {[1, 3, 7, 14].map((d) => (
@@ -686,12 +888,12 @@ function Info(ctx: Ctx) {
       ) : null}
       {owner && open ? (
         <>
-          <h3>Modus ändern</h3>
+          <h3>Rechenart</h3>
           <div className="chips">
             {MODES.map((m) => (
               <Chip
                 key={m.id}
-                on={s.mode === m.id}
+                on={(s.mode === 'exact') === (m.id === 'exact')}
                 onClick={() =>
                   updateActivity(aid, {
                     settings: {
@@ -722,7 +924,7 @@ function Info(ctx: Ctx) {
           <InviteCard ctx={ctx} big={false} />
           <p className="muted">
             {activity.joinOpen && open
-              ? 'Sobald alle da sind, kannst du die Gruppe schließen. Beim Kassensturz schließt sie automatisch.'
+              ? 'Sobald alle da sind, kannst du die Gruppe schließen. Beim Ausgleich schließt sie automatisch.'
               : 'Ausgaben von vor dem Beitritt werden nicht auf neue Personen verteilt.'}
           </p>
           <h3>Person ohne App hinzufügen</h3>
@@ -732,6 +934,7 @@ function Info(ctx: Ctx) {
               className="btn"
               disabled={!name.trim()}
               onClick={() => {
+                if (taken(name)) return setNote(`Einen „${name.trim()}“ gibt es schon. Bitte mit Zusatz, z. B. „${name.trim()} B.“`);
                 const direct = activity.memberUids.length <= 1 || !!activity.joinOpen;
                 requestName(aid, uid, name.trim().slice(0, 30), activity.memberUids, data.members.length, !!activity.joinOpen);
                 setNote(direct ? `${name.trim()} ist dabei.` : 'Vorschlag gesendet. Die anderen müssen noch zustimmen.');
@@ -771,6 +974,50 @@ function Info(ctx: Ctx) {
             rechnen hier weiter.
           </p>
         </>
+      ) : null}
+      {canCancel ? (
+        <>
+          <h3>Findet nicht statt?</h3>
+          <button className="btn wide" onClick={() => setCancelSheet(true)}>
+            Veranstaltung absagen
+          </button>
+        </>
+      ) : null}
+      {cancelSheet ? (
+        <Sheet title="Veranstaltung absagen" onClose={() => setCancelSheet(false)}>
+          <p>
+            „{activity.title}“ wird für alle als <strong>abgesagt</strong> markiert und wandert unter „Abgeschlossen“. Es gibt keine Ausgaben, also ist nichts auszugleichen. Du
+            kannst das später rückgängig machen.
+          </p>
+          <div className="bar">
+            <button className="btn" onClick={() => setCancelSheet(false)}>
+              Abbrechen
+            </button>
+            <button
+              className="btn primary grow"
+              onClick={() => {
+                updateActivity(aid, { status: 'cancelled', doneAt: Date.now(), joinOpen: false });
+                setCancelSheet(false);
+                go(`/a/${aid}`);
+              }}
+            >
+              Absagen
+            </button>
+          </div>
+        </Sheet>
+      ) : null}
+      {payeeSheet ? (
+        <Sheet title="Dein Zahlungsweg" onClose={() => setPayeeSheet(false)}>
+          <PayeeForm
+            name={me.name}
+            self
+            initial={myPayee ?? rememberedPayee()}
+            onSave={(p) => {
+              savePayee(aid, me.id, p, true);
+              setPayeeSheet(false);
+            }}
+          />
+        </Sheet>
       ) : null}
       {leaving ? <LeaveSheet ctx={ctx} member={leaving} involved={isInvolved(leaving.id, everything)} onClose={() => setLeaving(null)} /> : null}
       {isDemo ? (
@@ -864,7 +1111,7 @@ function LeaveSheet({ ctx, member, involved, onClose }: { ctx: Ctx; member: Memb
             ))
           )}
           <p className="muted">
-            Ab jetzt {self ? 'bist du' : `ist ${member.name}`} bei neuen Ausgaben nicht mehr dabei. Bezahlt und bestätigt wird wie beim Kassensturz. Im Bericht
+            Ab jetzt {self ? 'bist du' : `ist ${member.name}`} bei neuen Ausgaben nicht mehr dabei. Bezahlt und bestätigt wird wie beim Ausgleich. Im Bericht
             wird der Austritt mit Datum vermerkt.
           </p>
         </>

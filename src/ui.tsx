@@ -11,16 +11,16 @@ export const FAIR_TEXT =
   'gleichen die größeren Unterschiede aus und lassen Kleinigkeiten bewusst liegen. So trägt niemand deutlich mehr ' +
   'als die anderen – und aus eurem Abend wird keine Buchhaltung.';
 
+/** Rechenart. „balanced“ gibt es nur noch bei älteren Aktivitäten und zählt als „Ungefähr“. */
 export const MODES: { id: Settings['mode']; name: string; text: string }[] = [
-  { id: 'relaxed', name: 'Locker & fair', text: 'Wir gleichen die größeren Unterschiede aus und ignorieren Kleinigkeiten.' },
-  { id: 'balanced', name: 'Fair & etwas genauer', text: 'Wir berücksichtigen, wer beteiligt war, und können einzelne Unterschiede angeben.' },
-  { id: 'exact', name: 'Genau', text: 'Wir rechnen centgenau, ohne Rundung und ohne Toleranz.' },
+  { id: 'relaxed', name: 'Ungefähr', text: 'Größere Unterschiede gleichen wir aus, Kleinigkeiten lassen wir liegen.' },
+  { id: 'exact', name: 'Centgenau', text: 'Jeder Cent wird ausgeglichen.' },
 ];
 
-export const modeName = (mode: Settings['mode']) => MODES.find((m) => m.id === mode)?.name ?? mode;
+export const modeName = (mode: Settings['mode']) => (mode === 'exact' ? 'Centgenau' : 'Ungefähr');
 
 export function roundingText(step: number | null, tolerance: number | null): string {
-  if (step == null) return 'Rundung: intelligent (Vorschlag beim Kassensturz)';
+  if (step == null) return 'Rundung: intelligent (Vorschlag beim Ausgleich)';
   const round = step <= 1 ? 'centgenau' : `Rundung auf ${euro(step)}`;
   const tol = tolerance == null ? (step <= 1 ? 0 : step * 2) : tolerance;
   return tol > 0 ? `${round} · Unterschiede unter ${euro(tol)} gleichen wir nicht aus` : round;
@@ -248,4 +248,26 @@ export function CountUp({ cents }: { cents: number }) {
     return () => cancelAnimationFrame(frame);
   }, [cents]);
   return <>{shown === cents ? euro(cents) : euro(Math.round(shown / 100) * 100)}</>;
+}
+
+// Datum: Eingabefeld (JJJJ-MM-TT) ↔ Millisekunden, immer in Ortszeit
+const pad = (n: number) => String(n).padStart(2, '0');
+export function toInputDate(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+export function fromInputDate(value: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime() : null;
+}
+export const startOfDay = (ms: number) => {
+  const d = new Date(ms);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+};
+export const endOfDay = (ms: number) => startOfDay(ms) + 86400000 - 1;
+/** „Sa., 17. Okt.“ bzw. „Sa., 17. – Mo., 19. Okt.“ */
+export function dateRange(start: number, end?: number | null): string {
+  const f = (ms: number) => new Date(ms).toLocaleDateString('de-DE', { weekday: 'short', day: 'numeric', month: 'short' });
+  if (!end || startOfDay(end) === startOfDay(start)) return f(start);
+  return `${f(start)} – ${f(end)}`;
 }

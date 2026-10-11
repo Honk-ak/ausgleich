@@ -49,6 +49,26 @@ export function cleanPaypalHandle(input: string): string {
   return /^[A-Za-z0-9]{1,20}$/.test(handle) ? handle : '';
 }
 
+export type PaypalKind = 'email' | 'phone' | 'handle';
+
+/** Was steckt im PayPal-Feld? E-Mail, Handynummer oder PayPal.Me-Name. */
+export function paypalKind(input: string): PaypalKind | null {
+  const v = input.trim();
+  if (!v) return null;
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return 'email';
+  if (/^\+?[\d\s/()-]+$/.test(v) && v.replace(/\D/g, '').length >= 6) return 'phone';
+  return cleanPaypalHandle(v) ? 'handle' : null;
+}
+
+/** Bereinigt den Eintrag je nach Art. Leer, wenn nicht erkennbar. */
+export function cleanPaypal(input: string): string {
+  const kind = paypalKind(input);
+  if (kind === 'email') return input.trim().toLowerCase();
+  if (kind === 'phone') return input.trim().replace(/[^\d+]/g, '');
+  if (kind === 'handle') return cleanPaypalHandle(input);
+  return '';
+}
+
 export function paypalMeLink(handle: string, amountCents: number): string {
   const amount = amountCents % 100 === 0 ? String(amountCents / 100) : (amountCents / 100).toFixed(2);
   return `https://paypal.me/${cleanPaypalHandle(handle)}/${amount}EUR`;

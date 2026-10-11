@@ -41,7 +41,7 @@ export function Report(ctx: Ctx) {
       {activity.topic ? <p>Anlass: {activity.topic}</p> : null}
       <p>
         Beginn: {dt(activity.startsAt)}
-        {meta ? ` · Kassensturz: ${dt(meta.confirmedAt)}` : ' · Kassensturz noch nicht gemacht'}
+        {meta ? ` · Ausgleich vereinbart: ${dt(meta.confirmedAt)}` : ' · Ausgleich noch nicht vereinbart'}
       </p>
       <p>Personen: {data.members.filter((m) => !m.leftAt).map((m) => m.name).join(', ')}</p>
       {left.map((m) => (
@@ -165,7 +165,7 @@ export function Report(ctx: Ctx) {
       ) : null}
       {!meta ? (
         <>
-          <p>Vorschau Kassensturz (noch nicht bestätigt):</p>
+          <p>Vorschau Ausgleich (noch nicht vereinbart):</p>
           <ul>
             {result.payments.map((p, i) => (
               <li key={i}>

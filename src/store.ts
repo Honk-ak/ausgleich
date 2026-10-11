@@ -23,6 +23,7 @@ import { useEffect, useState } from 'react';
 import { firebaseConfig } from './firebase-config';
 import type { Mode, Share, SettlementOut } from './core/settle';
 import type * as T from './types';
+import { sameName } from './types';
 export * from './types';
 
 const app = initializeApp(firebaseConfig);
@@ -108,6 +109,7 @@ export function useSignals(uid: string | null, aids: string[]): Record<string, T
         });
       const ignore = () => undefined;
       stops.push(
+        onSnapshot(act(aid), (snap) => patch({ activity: snap.exists() ? ({ id: snap.id, topic: '', ...snap.data() } as T.Activity) : null }), ignore),
         onSnapshot(sub(aid, 'members'), (snap) => {
           const members = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as T.Member);
           patch({ members, myMemberId: (members.find((m) => m.uid === uid && !m.leftAt) ?? members.find((m) => m.uid === uid))?.id ?? null });
@@ -193,19 +195,19 @@ export function useActivity(aid: string, uid: string | null): T.ActivityData {
 /** Legt eine Aktivität an. Braucht Netz, weil der Server die Mitgliedschaft bestätigen muss. */
 export async function createActivity(
   uid: string,
-  input: { title: string; topic: string; myName: string; others: string[]; duration: string; endsAt: number | null; settings: T.Settings },
+  input: { title: string; myName: string; startsAt: number; endsAt: number; settings: T.Settings },
 ): Promise<string> {
   const aid = newId();
   const token = newToken();
   const now = Date.now();
   await setDoc(act(aid), {
     title: input.title,
-    topic: input.topic,
+    topic: '',
     createdBy: uid,
     createdAt: now,
-    startsAt: now,
+    startsAt: input.startsAt,
     endsAt: input.endsAt,
-    duration: input.duration,
+    duration: 'date',
     status: 'open',
     settings: input.settings,
     token,
@@ -214,19 +216,15 @@ export async function createActivity(
   });
   await setDoc(subDoc(aid, 'invites', token), { title: input.title, createdAt: now });
   await setDoc(subDoc(aid, 'members', uid), { name: input.myName, uid, color: 0, role: 'organizer', createdAt: now });
-  await Promise.all(
-    input.others.map((name, i) =>
-      setDoc(subDoc(aid, 'members', newId()), { name, uid: null, color: (i + 1) % 8, role: 'member', createdAt: now + i + 1 }),
-    ),
-  );
   await setDoc(doc(db, 'users', uid, 'activities', aid), {
     title: input.title,
-    topic: input.topic,
-    startsAt: now,
+    topic: '',
+    startsAt: input.startsAt,
+    endsAt: input.endsAt,
     joinedAt: now,
     status: 'open',
     token,
-    names: [input.myName, ...input.others],
+    names: [input.myName],
   });
   localStorage.setItem('fair.name', input.myName);
   return aid;
@@ -237,7 +235,17 @@ export function syncMyCopy(uid: string, a: T.Activity, names: string[], status: 
   later(
     setDoc(
       doc(db, 'users', uid, 'activities', a.id),
-      { title: a.title, topic: a.topic ?? '', startsAt: a.startsAt, status, token: a.token, names },
+      {
+        title: a.title,
+        topic: a.topic ?? '',
+        startsAt: a.startsAt,
+        endsAt: a.endsAt ?? null,
+        doneAt: a.doneAt ?? null,
+        picture: a.picture ?? '',
+        status,
+        token: a.token,
+        names,
+      },
       { merge: true },
     ),
   );
@@ -303,8 +311,9 @@ export async function completeJoin(uid: string, aid: string) {
 }
 
 /**
- * Beitreten über den QR-Code. Ist die Tür offen, ist man sofort dabei (true).
+ * Beitreten über den QR-Code. Ist die Tür offen, ist man sofort Mitglied (true).
  * Ist die Gruppe geschlossen, bleibt die Anfrage stehen und alle müssen zustimmen (false).
+ * Den Namen trägt danach claimName ein.
  */
 export async function joinNow(uid: string, aid: string, token: string, name: string, title: string): Promise<boolean> {
   await requestJoin(uid, aid, token, name, title);
@@ -313,21 +322,39 @@ export async function joinNow(uid: string, aid: string, token: string, name: str
   } catch {
     return false;
   }
-  await enterAs(aid, uid, name);
   // Die Anfrage wird nicht mehr gebraucht, sonst sähen die anderen sie als offen
   await deleteDoc(subDoc(aid, 'requests', uid)).catch(() => undefined);
   return true;
 }
 
-/** Nach dem Beitritt: steht der Name schon frei in der Liste (ohne App), übernehmen; sonst neu eintragen. */
-export async function enterAs(aid: string, uid: string, name: string) {
+export type NameResult = { kind: 'ok'; memberId: string } | { kind: 'taken' } | { kind: 'ask'; free: T.Member };
+
+/**
+ * Nach dem Beitritt den eigenen Namen eintragen.
+ * - Name schon vergeben an jemanden mit App: 'taken' (Zusatz nötig)
+ * - Name steht frei in der Liste (Person ohne App): 'ask' („Bist du das?“), mit claimFree übernehmen
+ */
+export async function claimName(aid: string, uid: string, name: string, claimFree = false): Promise<NameResult> {
   const snap = await getDocs(sub(aid, 'members'));
-  const members = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as T.Member);
-  if (members.some((m) => m.uid === uid && !m.leftAt)) return;
-  const key = name.trim().toLocaleLowerCase('de');
-  const free = members.find((m) => !m.uid && !m.leftAt && m.name.trim().toLocaleLowerCase('de') === key);
-  if (free) return claimMember(aid, free.id, uid);
-  addSelf(aid, uid, name, members.length);
+  const members = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as T.Member).filter((m) => !m.leftAt);
+  const mine = members.find((m) => m.uid === uid);
+  if (mine) return { kind: 'ok', memberId: mine.id };
+  const twin = members.find((m) => sameName(m.name, name));
+  if (twin && twin.uid) return { kind: 'taken' };
+  if (twin && !twin.uid) {
+    if (!claimFree) return { kind: 'ask', free: twin };
+    claimMember(aid, twin.id, uid);
+    localStorage.setItem('fair.name', twin.name);
+    return { kind: 'ok', memberId: twin.id };
+  }
+  localStorage.setItem('fair.name', name.trim());
+  return { kind: 'ok', memberId: addSelf(aid, uid, name.trim().slice(0, 30), snap.size) };
+}
+
+/** Eigenen Namen ändern. */
+export function renameMember(aid: string, memberId: string, name: string) {
+  later(updateDoc(subDoc(aid, 'members', memberId), { name }));
+  localStorage.setItem('fair.name', name);
 }
 
 /** Organisator: Tür öffnen oder schließen. */
@@ -397,8 +424,10 @@ export function rejectRequest(aid: string, req: T.JoinRequest, uid: string) {
 export function claimMember(aid: string, memberId: string, uid: string) {
   later(updateDoc(subDoc(aid, 'members', memberId), { uid }));
 }
-export function addSelf(aid: string, uid: string, name: string, count: number) {
-  addMemberDoc(aid, newId(), name, uid, count);
+export function addSelf(aid: string, uid: string, name: string, count: number): string {
+  const id = newId();
+  addMemberDoc(aid, id, name, uid, count);
+  return id;
 }
 
 function log(aid: string, entry: Omit<T.HistoryEntry, 'id' | 'at'>) {
@@ -458,13 +487,17 @@ export function setExpenseDeleted(aid: string, expense: T.Expense, deleted: bool
   log(aid, { expenseId: expense.id, action: deleted ? 'delete' : 'restore', byName, summary, reason });
 }
 
-export function updateActivity(aid: string, patch: Partial<Pick<T.Activity, 'settings' | 'topic' | 'status' | 'joinOpen'>>) {
+export function updateActivity(
+  aid: string,
+  patch: Partial<Pick<T.Activity, 'settings' | 'topic' | 'status' | 'joinOpen' | 'title' | 'startsAt' | 'endsAt' | 'picture' | 'doneAt'>>,
+) {
   later(updateDoc(act(aid), patch));
 }
 
-export function savePayee(aid: string, memberId: string, payee: Omit<T.Payee, 'id'>) {
+/** Zahlungsangaben speichern. Nur die eigenen merkt sich das Handy für künftige Aktivitäten. */
+export function savePayee(aid: string, memberId: string, payee: Omit<T.Payee, 'id'>, mine: boolean) {
   later(setDoc(subDoc(aid, 'payees', memberId), payee));
-  localStorage.setItem('fair.payee', JSON.stringify(payee));
+  if (mine) localStorage.setItem('fair.payee', JSON.stringify(payee));
 }
 
 export function rememberedPayee(): Omit<T.Payee, 'id'> | null {
@@ -510,12 +543,12 @@ function metaDoc(uid: string, result: SettlementOut, round: number, reminderDays
   };
 }
 
-/** „Passt für uns“: Kassensturz festhalten und die Zahlungen anlegen. */
+/** „Passt für uns“: Ausgleich festhalten und die Zahlungen anlegen. */
 export function confirmSettlement(aid: string, uid: string, result: SettlementOut, reminderDays: number) {
   const batch = writeBatch(db);
   batch.set(subDoc(aid, 'settlements', 'current'), metaDoc(uid, result, 1, reminderDays, Date.now()));
   for (const p of result.payments) batch.set(subDoc(aid, 'payments', newId()), paymentDoc(p, 1, reminderDays));
-  batch.update(act(aid), { status: result.payments.length ? 'settled' : 'done', joinOpen: false });
+  batch.update(act(aid), { status: result.payments.length ? 'settled' : 'done', joinOpen: false, ...(result.payments.length ? {} : { doneAt: Date.now() }) });
   later(batch.commit());
 }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ExpenseInput, exitPlan, settle, splitShares } from './settle';
-import { cleanPaypalHandle, epcPayload, isValidIban, parseAmount, paypalMeLink } from './pay';
+import { cleanPaypal, cleanPaypalHandle, epcPayload, isValidIban, parseAmount, paypalKind, paypalMeLink } from './pay';
 
 const all = (ids: string[]) => ids.map((memberId) => ({ memberId, weight: 1 }));
 const people = ['anna', 'lisa', 'peter', 'tom'];
@@ -159,6 +159,19 @@ describe('Anteile', () => {
   });
   it('rechnet Gewichte', () => {
     expect(splitShares(900, [{ memberId: 'a', weight: 2 }, { memberId: 'b', weight: 1 }], 0)).toEqual({ a: 600, b: 300 });
+  });
+});
+
+describe('PayPal-Eingabe', () => {
+  it('erkennt E-Mail, Handynummer und PayPal.Me-Namen', () => {
+    expect(paypalKind('Anna@Example.de')).toBe('email');
+    expect(paypalKind('+49 170 1234567')).toBe('phone');
+    expect(paypalKind('paypal.me/AnnaBeispiel')).toBe('handle');
+    expect(paypalKind('AnnaBeispiel')).toBe('handle');
+    expect(paypalKind('???')).toBe(null);
+    expect(cleanPaypal('Anna@Example.de ')).toBe('anna@example.de');
+    expect(cleanPaypal('+49 (170) 123-4567')).toBe('+491701234567');
+    expect(cleanPaypal('https://www.paypal.me/AnnaB/12')).toBe('AnnaB');
   });
 });
 

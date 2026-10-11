@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { cleanPaypalHandle, epcPayload, euro, formatIban, isValidIban, paypalMeLink } from '../core/pay';
-import { confirmSettlement, Payment, recalcSettlement, rememberedPayee, savePayee, setPaymentStatus, useOnline } from '../store';
+import { cleanPaypalHandle, epcPayload, euro, formatIban, isValidIban, PaypalKind, paypalKind, paypalMeLink } from '../core/pay';
+import { confirmSettlement, Payment, payeeMethod, recalcSettlement, rememberedPayee, savePayee, setPaymentStatus, useOnline } from '../store';
+import { PayeeForm } from './PayeeForm';
 import { Avatar, Chip, copy, go, Header, isPhone, Qr, qrImage, roundingText, share, Sheet, time } from '../ui';
 import type { Ctx } from './Activity';
 
@@ -37,23 +38,42 @@ export function Settle(ctx: Ctx) {
   const roundTitle = (r: number) => (r === 0 ? 'Teilausgleich (vorzeitig gegangen)' : r === 1 ? `Ausgleich vom ${day(meta!.confirmedAt)}` : `Nachausgleich ${r - 1}`);
   const finished = data.payments.length > 0 && data.payments.every((p) => p.status === 'received' || p.status === 'closed');
 
-  const Card = ({ p }: { p: Payment }) => (
-    <button className={`card pay s-${p.status}`} onClick={() => setOpen(p.id)}>
-      <Avatar member={byId[p.from]} size={36} />
-      <span className="grow">
-        <strong>
-          {name(p.from)} → {name(p.to)}
-        </strong>
-        <small>{statusText(p, plainName)}</small>
-      </span>
-      <span className="amount">{euro(p.amountCents)}</span>
-    </button>
-  );
+  if (activity.status === 'cancelled')
+    return (
+      <main>
+        <Header title="Ausgleich" back={`/a/${aid}`} />
+        <p className="card center">Diese Veranstaltung wurde abgesagt. Es gibt nichts auszugleichen.</p>
+      </main>
+    );
+
+  // Was ist für mich zu tun? Dann wird die Karte deutlich als antippbar gezeigt.
+  const todo = (p: Payment): string => {
+    if (p.from === me.id && p.status === 'open') return 'Jetzt bezahlen ›';
+    if (p.to === me.id && p.status === 'sent') return 'Eingang bestätigen ›';
+    if (p.to === me.id && p.status === 'open' && !data.payees[me.id]) return 'Zahlungsweg festlegen ›';
+    return '';
+  };
+  const Card = ({ p }: { p: Payment }) => {
+    const cta = todo(p);
+    return (
+      <button className={`card pay s-${p.status} ${cta ? 'actionable' : ''}`} onClick={() => setOpen(p.id)}>
+        <Avatar member={byId[p.from]} size={36} />
+        <span className="grow">
+          <strong>
+            {name(p.from)} → {name(p.to)}
+          </strong>
+          <small>{statusText(p, plainName)}</small>
+        </span>
+        <span className="amount">{euro(p.amountCents)}</span>
+        {cta ? <span className="pay-cta">{cta}</span> : <span className="chev">›</span>}
+      </button>
+    );
+  };
 
   return (
     <main>
       <Header
-        title="Kassensturz"
+        title="Ausgleich"
         back={`/a/${aid}`}
         right={
           <button className="icon-btn" onClick={() => go(`/a/${aid}/report`)} aria-label="Drucken oder als PDF speichern">
@@ -95,7 +115,7 @@ export function Settle(ctx: Ctx) {
             </div>
           ))}
           <p className="muted center">{roundingText(result.stepCents, result.toleranceCents)}</p>
-          {busy ? <p className="warn">Für den Kassensturz müssen alle Ausgaben übertragen sein. Bitte kurz ins Netz gehen.</p> : null}
+          {busy ? <p className="warn">Für den Ausgleich müssen alle Ausgaben übertragen sein. Bitte kurz ins Netz gehen.</p> : null}
           <button className="btn primary wide big" disabled={busy} onClick={() => confirmSettlement(aid, uid, result, days)}>
             Passt für uns
           </button>
@@ -108,7 +128,7 @@ export function Settle(ctx: Ctx) {
           {changed ? (
             <div className="card warn-card">
               <p>
-                <strong>Nach dem Kassensturz wurde etwas korrigiert.</strong> Erledigte und gemeldete Zahlungen bleiben bestehen. Die Differenz sieht so aus:
+                <strong>Nach dem Ausgleich wurde etwas korrigiert.</strong> Erledigte und gemeldete Zahlungen bleiben bestehen. Die Differenz sieht so aus:
               </p>
               {result.payments.length === 0 ? <p>Kein weiterer Ausgleich nötig.</p> : null}
               {result.payments.map((p, i) => (
@@ -182,21 +202,22 @@ function PaySheet({ ctx, payment: p, onClose }: { ctx: Ctx; payment: Payment; on
   const to = byId[p.to];
   const from = byId[p.from];
   const payee = data.payees[p.to];
+  const method = payeeMethod(payee);
   const iAmPayer = p.from === me.id;
   const iAmReceiver = p.to === me.id;
   const canClose = (iAmPayer || activity.createdBy === uid) && (p.status === 'open' || p.status === 'sent');
-  const remembered = iAmReceiver ? rememberedPayee() : null;
   const [editing, setEditing] = useState(false);
-  const [holder, setHolder] = useState(payee?.holder ?? remembered?.holder ?? '');
-  const [iban, setIban] = useState(payee?.iban ?? remembered?.iban ?? '');
-  const [paypal, setPaypal] = useState(payee?.paypal ?? remembered?.paypal ?? '');
   const [closing, setClosing] = useState(false);
   const [reason, setReason] = useState('');
   const [note, setNote] = useState('');
   const purpose = `${activity.title} - Ausgleich`;
-  const hasBank = payee != null && payee.holder.trim() !== '' && isValidIban(payee.iban);
-  const handle = payee ? cleanPaypalHandle(payee.paypal) : '';
-  const [qrKind, setQrKind] = useState<'bank' | 'paypal'>(hasBank ? 'bank' : 'paypal');
+  const hasBank = payee != null && payee.holder.trim() !== '' && isValidIban(payee.iban) && method !== 'cash';
+  const pp = payee && method !== 'cash' ? payee.paypal : '';
+  const ppKind = paypalKind(pp);
+  const handle = ppKind === 'handle' ? cleanPaypalHandle(pp) : '';
+  const hasPaypal = ppKind != null;
+  // ältere Einträge können beides haben; dann darf man wählen, sonst gilt der gewählte Weg
+  const [qrKind, setQrKind] = useState<'bank' | 'paypal'>(method === 'paypal' || !hasBank ? 'paypal' : 'bank');
   let bankQr = '';
   if (hasBank) {
     try {
@@ -206,49 +227,15 @@ function PaySheet({ ctx, payment: p, onClose }: { ctx: Ctx; payment: Payment; on
     }
   }
   const paypalUrl = handle ? paypalMeLink(handle, p.amountCents) : '';
-  const ibanOk = iban.trim() === '' || isValidIban(iban);
-  const paypalOk = paypal.trim() === '' || cleanPaypalHandle(paypal) !== '';
-  const canSave = ibanOk && paypalOk && (iban.trim() === '' || holder.trim() !== '') && (iban.trim() !== '' || paypal.trim() !== '');
   const bankText = hasBank ? `Empfänger: ${payee.holder}\nIBAN: ${formatIban(payee.iban)}\nBetrag: ${euro(p.amountCents, true)}\nVerwendungszweck: ${purpose}` : '';
   const act = (status: Payment['status'], extra: Partial<Payment> = {}) => {
     setPaymentStatus(aid, p, status, extra);
     onClose();
   };
-  const showForm = editing || (iAmReceiver && p.status === 'open' && !hasBank && !handle);
-
-  const payeeForm = (
-    <>
-      <p className="muted">
-        {iAmReceiver
-          ? 'Wohin soll das Geld gehen? Die Angaben sehen nur die Mitglieder dieser Aktivität.'
-          : `${to?.name} hat noch nichts hinterlegt. Bar geht immer. Wenn du die Bankverbindung kennst, kannst du sie hier eintragen.`}
-      </p>
-      <label className="field">
-        <span>Name des Kontoinhabers</span>
-        <input value={holder} onChange={(e) => setHolder(e.target.value)} maxLength={70} autoComplete="name" />
-      </label>
-      <label className="field">
-        <span>IBAN</span>
-        <input value={iban} onChange={(e) => setIban(e.target.value)} maxLength={40} autoCapitalize="characters" />
-      </label>
-      {!ibanOk ? <p className="warn">Diese IBAN ist nicht gültig. Bitte prüfe sie.</p> : null}
-      <label className="field">
-        <span>PayPal.Me-Name (optional)</span>
-        <input value={paypal} onChange={(e) => setPaypal(e.target.value)} maxLength={30} placeholder="z. B. AnnaBeispiel" />
-      </label>
-      {!paypalOk ? <p className="warn">Bitte nur den Namen hinter „paypal.me/“ eintragen.</p> : null}
-      <button
-        className="btn primary wide"
-        disabled={!canSave}
-        onClick={() => {
-          savePayee(aid, p.to, { holder: holder.trim(), iban: iban.replace(/\s+/g, '').toUpperCase(), paypal: cleanPaypalHandle(paypal) });
-          setEditing(false);
-        }}
-      >
-        Zahlungsangaben speichern
-      </button>
-    </>
-  );
+  const nothing = !hasBank && !hasPaypal && method !== 'cash';
+  const showForm = editing || (iAmReceiver && p.status === 'open' && nothing);
+  const showBank = hasBank && (qrKind === 'bank' || !hasPaypal);
+  const showPaypal = hasPaypal && (qrKind === 'paypal' || !hasBank);
 
   return (
     <Sheet title={`${from?.name} → ${to?.name}`} onClose={onClose}>
@@ -274,22 +261,24 @@ function PaySheet({ ctx, payment: p, onClose }: { ctx: Ctx; payment: Payment; on
       {/* Zahler: bezahlen und melden */}
       {iAmPayer && p.status === 'open' && !showForm ? (
         <>
-          {!hasBank && !handle ? (
+          {nothing ? (
             <p className="card">
-              {to?.name} hat noch keine Zahlungsangaben hinterlegt. Bitte {to?.name} kurz darum, oder gib das Geld bar. Sobald die Angaben da sind, erscheinen hier QR-Code und PayPal-Knopf.
+              {to?.name} hat noch keinen Zahlungsweg festgelegt. Bitte {to?.name} kurz darum, oder gib das Geld bar. Sobald die Angaben da sind, erscheinen
+              hier Überweisungsdaten oder PayPal.
             </p>
           ) : null}
-          {bankQr && paypalUrl ? (
+          {method === 'cash' ? <p className="card">{to?.name} möchte das Geld am liebsten bar bekommen.</p> : null}
+          {hasBank && hasPaypal ? (
             <div className="chips center-chips">
               <Chip on={qrKind === 'bank'} onClick={() => setQrKind('bank')}>
-                Banking-App
+                Überweisung
               </Chip>
               <Chip on={qrKind === 'paypal'} onClick={() => setQrKind('paypal')}>
                 PayPal
               </Chip>
             </div>
           ) : null}
-          {bankQr && (qrKind === 'bank' || !paypalUrl) ? (
+          {showBank && bankQr ? (
             <BankTransfer
               holder={payee.holder}
               iban={payee.iban}
@@ -299,7 +288,7 @@ function PaySheet({ ctx, payment: p, onClose }: { ctx: Ctx; payment: Payment; on
               fileName={`Ueberweisung-${to?.name ?? 'Ausgleich'}`}
             />
           ) : null}
-          {paypalUrl && (qrKind === 'paypal' || !bankQr) ? (
+          {showPaypal && paypalUrl ? (
             <>
               <a className="btn primary wide" href={paypalUrl} target="_blank" rel="noopener noreferrer">
                 PayPal öffnen und senden
@@ -311,18 +300,21 @@ function PaySheet({ ctx, payment: p, onClose }: { ctx: Ctx; payment: Payment; on
               <Qr text={paypalUrl} label="QR-Code für PayPal" />
             </>
           ) : null}
+          {showPaypal && !paypalUrl ? <PaypalManual to={pp} kind={ppKind!} amountCents={p.amountCents} /> : null}
           {note ? <p className="muted center">{note}</p> : null}
           <div className="bar">
             <button className="btn" onClick={() => act('sent', { method: 'bar' })}>
               Bar gegeben
             </button>
-            <button className="btn primary grow" onClick={() => act('sent', { method: qrKind === 'paypal' && paypalUrl ? 'PayPal' : 'Überweisung' })}>
-              Habe überwiesen
-            </button>
+            {method !== 'cash' ? (
+              <button className="btn primary grow" onClick={() => act('sent', { method: showPaypal ? 'PayPal' : 'Überweisung' })}>
+                Habe überwiesen
+              </button>
+            ) : null}
           </div>
           <p className="muted">Danach bestätigt {to?.name} den Eingang. Die App selbst sieht nicht, ob Geld angekommen ist.</p>
           <button className="link" onClick={() => setEditing(true)}>
-            Zahlungsangaben von {to?.name} {hasBank || handle ? 'ändern' : 'selbst eintragen'}
+            Zahlungsangaben von {to?.name} {nothing ? 'selbst eintragen' : 'ändern'}
           </button>
         </>
       ) : null}
@@ -358,12 +350,31 @@ function PaySheet({ ctx, payment: p, onClose }: { ctx: Ctx; payment: Payment; on
             Erhalten bestätigen
           </button>
           <button className="link" onClick={() => setEditing(true)}>
-            Meine Zahlungsangaben {hasBank || handle ? 'ändern' : 'hinterlegen'}
+            Meinen Zahlungsweg ändern
           </button>
         </>
       ) : null}
 
-      {showForm && p.status === 'open' ? payeeForm : null}
+      {showForm && p.status === 'open' ? (
+        <>
+          <p className="muted">
+            {iAmReceiver
+              ? 'Wie möchtest du das Geld bekommen?'
+              : `Falls du ${to?.name}s Angaben kennst, kannst du sie hier eintragen. Bar geht immer.`}
+          </p>
+          <PayeeForm
+            name={to?.name ?? ''}
+            self={iAmReceiver}
+            initial={payee ?? (iAmReceiver ? rememberedPayee() : null)}
+            onSave={(next) => {
+              savePayee(aid, p.to, next, iAmReceiver);
+              setEditing(false);
+            }}
+            onSkip={editing ? () => setEditing(false) : undefined}
+            skipLabel="Abbrechen"
+          />
+        </>
+      ) : null}
 
       {!iAmPayer && !iAmReceiver && p.status !== 'received' && p.status !== 'closed' ? (
         <p className="muted center">Diese Zahlung betrifft {from?.name} und {to?.name}.</p>
@@ -412,6 +423,45 @@ function PaySheet({ ctx, payment: p, onClose }: { ctx: Ctx; payment: Payment; on
         </div>
       ) : null}
     </Sheet>
+  );
+}
+
+/** PayPal per E-Mail oder Handynummer: Ein Link mit Betrag geht hier nicht, also kopieren und PayPal öffnen. */
+function PaypalManual({ to, kind, amountCents }: { to: string; kind: PaypalKind; amountCents: number }) {
+  const [copied, setCopied] = useState('');
+  const amount = (amountCents / 100).toFixed(2).replace('.', ',');
+  const rows = [
+    { key: 'to', label: kind === 'email' ? 'PayPal-E-Mail' : 'PayPal-Handynummer', value: to },
+    { key: 'amount', label: 'Betrag', value: amount },
+  ];
+  return (
+    <>
+      <p className="muted">In PayPal auf „Senden“ tippen, Empfänger und Betrag einfügen und „Freunde und Familie“ wählen:</p>
+      <div className="card copy-list">
+        {rows.map((r) => (
+          <div className="copy-row" key={r.key}>
+            <span className="grow">
+              <small>{r.label}</small>
+              {r.key === 'amount' ? `${r.value} €` : r.value}
+            </span>
+            <button
+              className="btn small"
+              onClick={async () => {
+                if (await copy(r.value)) {
+                  setCopied(r.key);
+                  setTimeout(() => setCopied((c) => (c === r.key ? '' : c)), 2000);
+                }
+              }}
+            >
+              {copied === r.key ? 'Kopiert ✓' : 'Kopieren'}
+            </button>
+          </div>
+        ))}
+      </div>
+      <a className="btn primary wide" href="https://www.paypal.com/myaccount/transfer/homepage/pay" target="_blank" rel="noopener noreferrer">
+        PayPal öffnen
+      </a>
+    </>
   );
 }
 

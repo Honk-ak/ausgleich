@@ -21,12 +21,16 @@ export interface Activity {
   startsAt: number;
   endsAt: number | null;
   duration: string;
-  status: 'open' | 'settled' | 'done';
+  status: 'open' | 'settled' | 'done' | 'cancelled';
   settings: Settings;
   token: string;
   memberUids: string[];
   /** „Tür offen“: Wer den QR-Code scannt, ist ohne Zustimmung sofort dabei. */
   joinOpen?: boolean;
+  /** Bild: leer = automatisch aus dem Namen, 'none' = aus, sonst fester Schlüssel */
+  picture?: string;
+  /** wann „erledigt“ oder „abgesagt“ wurde (für die Startseite) */
+  doneAt?: number | null;
 }
 export interface Member {
   id: string;
@@ -69,7 +73,10 @@ export interface Payee {
   id: string;
   holder: string;
   iban: string;
+  /** E-Mail, Handynummer oder PayPal.Me-Name */
   paypal: string;
+  /** gewählter Weg; fehlt bei älteren Einträgen */
+  method?: 'bank' | 'paypal' | 'cash';
 }
 export interface Payment {
   id: string;
@@ -122,12 +129,16 @@ export interface MyActivity {
   topic: string;
   startsAt: number;
   joinedAt: number;
-  status: 'pending' | 'open' | 'settled' | 'done';
+  status: 'pending' | 'open' | 'settled' | 'done' | 'cancelled';
   token: string;
   names: string[];
   hidden?: boolean;
+  endsAt?: number | null;
+  doneAt?: number | null;
+  picture?: string;
 }
 export interface Signals {
+  activity?: Activity | null;
   myMemberId: string | null;
   members: Member[];
   payments: Payment[];
@@ -161,4 +172,16 @@ export function countedTransfers(payments: Payment[], afterSettlement: boolean) 
   return payments
     .filter((p) => p.kind === 'exit' || (afterSettlement && p.status !== 'open'))
     .map((p) => ({ from: p.from, to: p.to, amountCents: p.amountCents }));
+}
+
+/** Gleicher Name? Groß/klein und Leerzeichen zählen nicht. */
+export const sameName = (a: string, b: string) => a.trim().toLocaleLowerCase('de') === b.trim().toLocaleLowerCase('de');
+
+/** Weg einer Zahlungsangabe, auch für ältere Einträge ohne `method`. */
+export function payeeMethod(p: Payee | null | undefined): Payee['method'] | null {
+  if (!p) return null;
+  if (p.method) return p.method;
+  if (p.iban) return 'bank';
+  if (p.paypal) return 'paypal';
+  return null;
 }
