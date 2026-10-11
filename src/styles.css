@@ -275,3 +275,4 @@ details.fold > div { display: flex; flex-direction: column; gap: 10px; }
 .card.hello { display: flex; align-items: flex-start; gap: 8px; background: var(--coral-soft); border-color: transparent; }
 .card.hello p { flex: 1; }
 .card.pay .chev { color: var(--muted); }
+.row .today { color: var(--coral-text); font-weight: 700; }

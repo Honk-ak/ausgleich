@@ -18,8 +18,10 @@ import { Art, artFor } from '../art';
 import { Backdrop, Brand, Chip, dateRange, endOfDay, FAIR_TEXT, fromInputDate, go, Header, roundingText, Sheet, startOfDay, toInputDate } from '../ui';
 
 const MONTHS = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
-const ARCHIVE_STATUS: { id: string; name: string; match: (s: MyActivity['status']) => boolean }[] = [
+const STATUS_FILTER: { id: string; name: string; match: (s: MyActivity['status']) => boolean }[] = [
   { id: 'all', name: 'Alle', match: () => true },
+  { id: 'open', name: 'Laufend', match: (s) => s === 'open' || s === 'pending' },
+  { id: 'settled', name: 'Zahlungen offen', match: (s) => s === 'settled' },
   { id: 'done', name: 'Erledigt', match: (s) => s === 'done' },
   { id: 'cancelled', name: 'Abgesagt', match: (s) => s === 'cancelled' },
 ];
@@ -30,9 +32,7 @@ const STATUS_TEXT: Record<MyActivity['status'], string> = {
   done: 'erledigt',
   cancelled: 'abgesagt',
 };
-/** Erledigtes bleibt so lange oben stehen, danach rutscht es nach „Abgeschlossen“. */
-const KEEP_DONE_MS = 7 * 86400000;
-const SHOW_RUNNING = 3;
+const SHOW_CURRENT = 3;
 
 export function ReminderPopup({ items, onClose }: { items: Reminder[]; onClose: () => void }) {
   useEffect(() => markSeen(items), [items]);
@@ -63,7 +63,7 @@ export function Home({ uid }: { uid: string }) {
   const [status, setStatus] = useState('all');
   const [year, setYear] = useState('');
   const [month, setMonth] = useState('');
-  const [day, setDay] = useState('');
+  const [day0, setDay0] = useState('');
   const [showFilter, setShowFilter] = useState(false);
   const live = (copies ?? []).filter((a) => a.status !== 'done' && a.status !== 'pending' && a.status !== 'cancelled').map((a) => a.id);
   const signals = useSignals(uid, live);
@@ -97,43 +97,65 @@ export function Home({ uid }: { uid: string }) {
 
   const now = Date.now();
   const start = (a: MyActivity) => a.startsAt || a.joinedAt;
-  const archived = (a: MyActivity) => a.status === 'cancelled' || (a.status === 'done' && (a.doneAt ?? start(a)) < now - KEEP_DONE_MS);
-  const planning = (a: MyActivity) => a.status === 'open' || a.status === 'pending';
-  const isToday = (a: MyActivity) => planning(a) && start(a) <= endOfDay(now) && (a.endsAt ?? endOfDay(start(a))) >= startOfDay(now);
-  const isPlanned = (a: MyActivity) => planning(a) && start(a) > endOfDay(now);
+  const archived = (a: MyActivity) => a.status === 'cancelled' || a.status === 'done';
+  const isToday = (a: MyActivity) =>
+    (a.status === 'open' || a.status === 'pending') && start(a) <= endOfDay(now) && (a.endsAt ?? endOfDay(start(a))) >= startOfDay(now);
+  const isPlanned = (a: MyActivity) => (a.status === 'open' || a.status === 'pending') && start(a) > endOfDay(now);
   const all = list ?? [];
-  const today = all.filter((a) => !archived(a) && isToday(a));
-  const planned = all.filter((a) => !archived(a) && isPlanned(a)).sort((a, b) => start(a) - start(b));
-  const running = all
-    .filter((a) => !archived(a) && !isToday(a) && !isPlanned(a))
-    .sort((a, b) => Number(b.status === 'settled') - Number(a.status === 'settled') || start(b) - start(a));
+  // Aktuell: Heutiges zuerst, dann offene Zahlungen, dann der Rest (neueste zuerst), Geplantes ans Ende
+  const rank = (a: MyActivity) => (isToday(a) ? 0 : a.status === 'settled' ? 1 : isPlanned(a) ? 3 : 2);
+  const current = all.filter((a) => !archived(a)).sort((a, b) => rank(a) - rank(b) || (rank(a) === 3 ? start(a) - start(b) : start(b) - start(a)));
   const archive = all.filter(archived).sort((a, b) => start(b) - start(a));
 
   const date = (a: MyActivity) => new Date(start(a));
-  const years = [...new Set(archive.map((a) => date(a).getFullYear()))].sort((a, b) => b - a);
+  const day = (ms: number) => new Date(ms).toLocaleDateString('de-DE', { weekday: 'short', day: 'numeric', month: 'short' });
+  const years = [...new Set(all.map((a) => date(a).getFullYear()))].sort((a, b) => b - a);
   const needle = text.trim().toLowerCase();
-  const found = archive.filter((a) => {
-    const d = date(a);
-    if (year && d.getFullYear() !== Number(year)) return false;
-    if (month && d.getMonth() + 1 !== Number(month)) return false;
-    if (day && d.getDate() !== Number(day)) return false;
-    if (!ARCHIVE_STATUS.find((s) => s.id === status)!.match(a.status)) return false;
-    if (!needle) return true;
-    return [a.title, a.topic, ...(a.names ?? [])].some((v) => (v ?? '').toLowerCase().includes(needle));
-  });
-  const filtered = Boolean(needle || year || month || day || status !== 'all');
+  const filtered = Boolean(needle || year || month || day0 || status !== 'all');
+  const found = all
+    .filter((a) => {
+      const d = date(a);
+      if (year && d.getFullYear() !== Number(year)) return false;
+      if (month && d.getMonth() + 1 !== Number(month)) return false;
+      if (day0 && d.getDate() !== Number(day0)) return false;
+      if (!STATUS_FILTER.find((s) => s.id === status)!.match(a.status)) return false;
+      if (!needle) return true;
+      return [a.title, a.topic, ...(a.names ?? [])].some((v) => (v ?? '').toLowerCase().includes(needle));
+    })
+    .sort((a, b) => start(b) - start(a));
+  const openPayments = (a: MyActivity) => (signals[a.id]?.payments ?? []).filter((p) => p.status === 'open' || p.status === 'sent').length;
+  const when = (a: MyActivity) => {
+    if (isToday(a)) return <span className="today">Heute</span>;
+    if (isPlanned(a)) return `Geplant für ${day(start(a))}`;
+    if (archived(a)) return day(start(a));
+    return `Seit ${day(start(a))}`;
+  };
+  const state = (a: MyActivity) => {
+    if (a.status === 'done') return <span className="tick">✓ erledigt</span>;
+    if (a.status === 'cancelled') return 'abgesagt';
+    if (a.status === 'pending') return 'wartet auf Zustimmung';
+    if (a.status === 'settled') {
+      const n = openPayments(a);
+      return n ? `${n} ${n === 1 ? 'Zahlung' : 'Zahlungen'} offen` : 'Zahlungen offen';
+    }
+    return isToday(a) ? 'weiter erfassen' : '';
+  };
   const open = (a: MyActivity) => go(a.status === 'pending' ? `/join/${a.id}/${a.token}` : `/a/${a.id}`);
-  const row = (a: MyActivity) => (
-    <button className="card row" key={a.id} onClick={() => open(a)}>
-      <span className="grow">
-        <strong>{a.title}</strong>
-        <small>
-          {dateRange(start(a), a.endsAt)} · {a.status === 'done' ? <span className="tick">✓ erledigt</span> : isPlanned(a) && a.status === 'open' ? 'geplant' : STATUS_TEXT[a.status]}
-        </small>
-      </span>
-      <span className="chev">›</span>
-    </button>
-  );
+  const row = (a: MyActivity) => {
+    const st = state(a);
+    return (
+      <button className="card row" key={a.id} onClick={() => open(a)}>
+        <span className="grow">
+          <strong>{a.title}</strong>
+          <small>
+            {when(a)}
+            {st ? <> · {st}</> : null}
+          </small>
+        </span>
+        <span className="chev">›</span>
+      </button>
+    );
+  };
 
   return (
     <main>
@@ -147,110 +169,96 @@ export function Home({ uid }: { uid: string }) {
           {reminders.length === 1 ? '1 Erinnerung' : `${reminders.length} Erinnerungen`} · ansehen
         </button>
       ) : null}
-      {list == null ? <p className="muted center">Lädt …</p> : null}
-
-      {today.map((a) => (
-        <button className="card today-card pop" key={a.id} onClick={() => open(a)}>
-          <Art kind={artFor(a)} />
-          <span className="today-body">
-            <span className="kicker">Heute</span>
-            <strong>{a.title}</strong>
-            <small className="muted">
-              {dateRange(start(a), a.endsAt)} · {a.status === 'pending' ? STATUS_TEXT.pending : 'weiter erfassen ›'}
-            </small>
-          </span>
-        </button>
-      ))}
-
       <button className="btn primary big" onClick={() => go('/new')}>
         Neue Aktivität
       </button>
+      {list == null ? <p className="muted center">Lädt …</p> : null}
 
-      {planned.length > 0 ? (
+      {current.length > 0 ? (
         <>
-          <h3 className="section">Geplant</h3>
-          {planned.map(row)}
-        </>
-      ) : null}
-
-      {running.length > 0 ? (
-        <>
-          <h3 className="section">Laufend</h3>
-          {running.slice(0, SHOW_RUNNING).map(row)}
-          {running.length > SHOW_RUNNING ? (
+          <h3 className="section">Aktuell</h3>
+          {current.slice(0, SHOW_CURRENT).map(row)}
+          {current.length > SHOW_CURRENT ? (
             <details className="fold">
-              <summary>Weitere anzeigen ({running.length - SHOW_RUNNING})</summary>
-              <div>{running.slice(SHOW_RUNNING).map(row)}</div>
+              <summary>Weitere anzeigen ({current.length - SHOW_CURRENT})</summary>
+              <div>{current.slice(SHOW_CURRENT).map(row)}</div>
             </details>
           ) : null}
         </>
       ) : null}
 
-      {archive.length > 0 ? (
-        <details className="fold">
-          <summary>Abgeschlossen ({archive.length})</summary>
-          <div>
-            <div className="search">
-              <input type="search" value={text} onChange={(e) => setText(e.target.value)} placeholder="Suchen: Name, Person" aria-label="Abgeschlossene durchsuchen" />
-              <button className={`btn ${showFilter || filtered ? 'on' : ''}`} onClick={() => setShowFilter(!showFilter)} aria-expanded={showFilter}>
-                Filter
-              </button>
-            </div>
-            {showFilter ? (
-              <div className="card filters">
-                <div className="chips">
-                  {ARCHIVE_STATUS.map((s) => (
-                    <Chip key={s.id} on={status === s.id} onClick={() => setStatus(s.id)}>
-                      {s.name}
-                    </Chip>
-                  ))}
-                </div>
-                <div className="selects">
-                  <select value={year} onChange={(e) => setYear(e.target.value)} aria-label="Jahr">
-                    <option value="">Jahr</option>
-                    {years.map((y) => (
-                      <option key={y} value={y}>
-                        {y}
-                      </option>
-                    ))}
-                  </select>
-                  <select value={month} onChange={(e) => setMonth(e.target.value)} aria-label="Monat">
-                    <option value="">Monat</option>
-                    {MONTHS.map((m, i) => (
-                      <option key={m} value={i + 1}>
-                        {m}
-                      </option>
-                    ))}
-                  </select>
-                  <select value={day} onChange={(e) => setDay(e.target.value)} aria-label="Tag">
-                    <option value="">Tag</option>
-                    {Array.from({ length: 31 }, (_, i) => (
-                      <option key={i} value={i + 1}>
-                        {i + 1}.
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                {filtered ? (
-                  <button
-                    className="link"
-                    onClick={() => {
-                      setText('');
-                      setStatus('all');
-                      setYear('');
-                      setMonth('');
-                      setDay('');
-                    }}
-                  >
-                    Filter zurücksetzen
-                  </button>
-                ) : null}
-              </div>
-            ) : null}
-            {found.map(row)}
-            {found.length === 0 ? <p className="muted center">Nichts gefunden.</p> : null}
+      {all.length > 0 ? (
+        <>
+          <div className="search">
+            <input type="search" value={text} onChange={(e) => setText(e.target.value)} placeholder="Suchen: Name, Person" aria-label="Alle Aktivitäten durchsuchen" />
+            <button className={`btn ${showFilter || filtered ? 'on' : ''}`} onClick={() => setShowFilter(!showFilter)} aria-expanded={showFilter}>
+              Filter
+            </button>
           </div>
-        </details>
+          {showFilter ? (
+            <div className="card filters">
+              <div className="chips">
+                {STATUS_FILTER.map((s) => (
+                  <Chip key={s.id} on={status === s.id} onClick={() => setStatus(s.id)}>
+                    {s.name}
+                  </Chip>
+                ))}
+              </div>
+              <div className="selects">
+                <select value={year} onChange={(e) => setYear(e.target.value)} aria-label="Jahr">
+                  <option value="">Jahr</option>
+                  {years.map((y) => (
+                    <option key={y} value={y}>
+                      {y}
+                    </option>
+                  ))}
+                </select>
+                <select value={month} onChange={(e) => setMonth(e.target.value)} aria-label="Monat">
+                  <option value="">Monat</option>
+                  {MONTHS.map((m, i) => (
+                    <option key={m} value={i + 1}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+                <select value={day0} onChange={(e) => setDay0(e.target.value)} aria-label="Tag">
+                  <option value="">Tag</option>
+                  {Array.from({ length: 31 }, (_, i) => (
+                    <option key={i} value={i + 1}>
+                      {i + 1}.
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {filtered ? (
+                <button
+                  className="link"
+                  onClick={() => {
+                    setText('');
+                    setStatus('all');
+                    setYear('');
+                    setMonth('');
+                    setDay0('');
+                  }}
+                >
+                  Suche zurücksetzen
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          {filtered ? (
+            <>
+              <h3 className="section">{found.length === 1 ? '1 Treffer' : `${found.length} Treffer`}</h3>
+              {found.map(row)}
+              {found.length === 0 ? <p className="muted center">Nichts gefunden.</p> : null}
+            </>
+          ) : archive.length > 0 ? (
+            <details className="fold">
+              <summary>Abgeschlossen ({archive.length})</summary>
+              <div>{archive.map(row)}</div>
+            </details>
+          ) : null}
+        </>
       ) : null}
 
       {list != null && list.length === 0 ? (
