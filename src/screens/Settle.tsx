@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { cleanPaypalHandle, epcPayload, euro, formatIban, isValidIban, PaypalKind, paypalKind, paypalMeLink } from '../core/pay';
-import { confirmSettlement, Payment, payeeMethod, recalcSettlement, rememberedPayee, savePayee, setPaymentStatus, useOnline } from '../store';
+import { confirmSettlement, Payee, Payment, payeeMethod, recalcSettlement, rememberedPayee, savePayee, setPaymentStatus, useOnline } from '../store';
 import { PayeeForm } from './PayeeForm';
 import { Avatar, Chip, copy, go, Header, isPhone, Qr, qrImage, roundingText, share, Sheet, time } from '../ui';
 import type { Ctx } from './Activity';
@@ -341,10 +341,28 @@ function PaySheet({ ctx, payment: p, onClose }: { ctx: Ctx; payment: Payment; on
           </button>
         </>
       ) : null}
+      {(iAmReceiver || (activity.createdBy === uid && !from?.uid)) && p.status !== 'received' && p.status !== 'closed' && !showForm && !nothing ? (
+        <SendRequest
+          payerName={from?.name ?? ''}
+          payerHasApp={!!from?.uid}
+          receiverName={iAmReceiver ? me.name : (to?.name ?? '')}
+          title={activity.title}
+          amountCents={p.amountCents}
+          method={method}
+          holder={hasBank ? payee.holder : ''}
+          iban={hasBank ? payee.iban : ''}
+          paypal={hasPaypal ? pp : ''}
+          bankQr={bankQr}
+          paypalUrl={paypalUrl}
+          purpose={purpose}
+        />
+      ) : null}
       {iAmReceiver && p.status === 'open' && !showForm ? (
         <>
           <p className="muted">
-            {from?.name} hat noch nicht gemeldet, dass gezahlt wurde. Wenn das Geld trotzdem schon da ist, kannst du es hier bestätigen.
+            {from?.uid
+              ? `${from?.name} hat noch nicht gemeldet, dass gezahlt wurde. Wenn das Geld trotzdem schon da ist, kannst du es hier bestätigen.`
+              : 'Sobald das Geld da ist (überwiesen oder bar), bestätige hier den Eingang.'}
           </p>
           <button className="btn primary wide" onClick={() => act('received', { method: 'ohne Meldung' })}>
             Erhalten bestätigen
@@ -423,6 +441,122 @@ function PaySheet({ ctx, payment: p, onClose }: { ctx: Ctx; payment: Payment; on
         </div>
       ) : null}
     </Sheet>
+  );
+}
+
+/**
+ * Zahlungsaufforderung verschicken: für Personen ohne App (oder die später am PC zahlen).
+ * Text mit allen Angaben per WhatsApp, SMS oder E-Mail, dazu auf Wunsch ein Bild mit QR-Code.
+ */
+function SendRequest(props: {
+  payerName: string;
+  payerHasApp: boolean;
+  receiverName: string;
+  title: string;
+  amountCents: number;
+  method: Payee['method'] | null;
+  holder: string;
+  iban: string;
+  paypal: string;
+  bankQr: string;
+  paypalUrl: string;
+  purpose: string;
+}) {
+  const [note, setNote] = useState('');
+  const amount = euro(props.amountCents, true);
+  const lines: string[] = [`Hallo ${props.payerName},`, '', `für „${props.title}“ gibst du ${props.receiverName} noch ${amount} dazu.`];
+  if (props.method === 'cash') lines.push('', 'Am einfachsten bar beim nächsten Treffen.');
+  if (props.iban) {
+    lines.push('', 'Per Überweisung:', `Empfänger: ${props.holder}`, `IBAN: ${formatIban(props.iban)}`, `Betrag: ${amount}`, `Verwendungszweck: ${props.purpose}`);
+  }
+  if (props.paypalUrl) lines.push('', `Per PayPal (öffnet mit Betrag): ${props.paypalUrl}`);
+  else if (props.paypal) lines.push('', `Per PayPal an: ${props.paypal} (Betrag ${amount}, „Freunde und Familie“)`);
+  lines.push('', 'Danke!', `${props.receiverName}`, '', '(gesendet mit Ausgleich.app)');
+  const text = lines.join('\n');
+  const subject = `Ausgleich „${props.title}“: ${amount}`;
+  const qr = props.bankQr || props.paypalUrl;
+
+  const image = async (): Promise<File | null> => {
+    if (!qr) return null;
+    const rows: [string, string][] = props.bankQr
+      ? [
+          ['Empfänger', props.holder],
+          ['IBAN', formatIban(props.iban)],
+          ['Betrag', amount],
+          ['Verwendungszweck', props.purpose],
+        ]
+      : [
+          ['PayPal an', props.receiverName],
+          ['Betrag', amount],
+        ];
+    const blob = await qrImage({ qr, lines: rows, title: props.bankQr ? 'Überweisung' : 'PayPal' });
+    return new File([blob], `Ausgleich-${props.receiverName}.png`, { type: 'image/png' });
+  };
+
+  const sendAll = async () => {
+    setNote('');
+    try {
+      const file = await image().catch(() => null);
+      const nav = navigator as Navigator & { canShare?: (d: { files: File[] }) => boolean };
+      if (file && navigator.share && nav.canShare?.({ files: [file] })) {
+        await navigator.share({ text, files: [file] });
+        return;
+      }
+      const r = await share(text);
+      setNote(r === 'copied' ? 'Text kopiert. Du kannst ihn jetzt in eine Nachricht oder E-Mail einfügen.' : r === 'failed' ? 'Teilen nicht möglich.' : '');
+    } catch (e) {
+      if ((e as Error)?.name !== 'AbortError') setNote('Teilen nicht möglich.');
+    }
+  };
+  const saveImage = async () => {
+    const file = await image().catch(() => null);
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = file.name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    setNote('Bild gespeichert. Du kannst es weiterschicken oder ausdrucken.');
+  };
+
+  const body = (
+    <div className="card send-request">
+      <p>
+        <strong>{props.payerHasApp ? `Zahlungsdaten an ${props.payerName} schicken` : `${props.payerName} hat die App nicht?`}</strong>
+        <br />
+        <small className="muted">
+          {props.payerHasApp
+            ? 'Zum Beispiel, wenn lieber später am PC gezahlt wird.'
+            : `Schick die Zahlungsdaten per WhatsApp, SMS oder E-Mail. ${props.payerName} kann dann auch später zu Hause am PC überweisen.`}
+        </small>
+      </p>
+      <button className="btn primary wide" onClick={sendAll}>
+        Zahlungsdaten senden
+      </button>
+      <div className="bar">
+        <a className="btn grow" href={`mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(text)}`}>
+          Als E-Mail
+        </a>
+        {qr ? (
+          <button className="btn grow" onClick={saveImage}>
+            Bild mit QR-Code
+          </button>
+        ) : null}
+      </div>
+      {note ? <p className="muted">{note}</p> : null}
+      <p className="muted small-print">
+        Kommt das Geld an, bestätigst du es hier mit „Erhalten bestätigen“{props.payerHasApp ? '' : ` – ${props.payerName} muss dafür nichts tun`}.
+      </p>
+    </div>
+  );
+  // Hat die zahlende Person die App, sieht sie alles selbst; dann nur als aufklappbare Möglichkeit
+  if (!props.payerHasApp) return body;
+  return (
+    <details className="hint">
+      <summary>Zahlungsdaten an {props.payerName} schicken</summary>
+      {body}
+    </details>
   );
 }
 

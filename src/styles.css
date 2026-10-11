@@ -276,3 +276,5 @@ details.fold > div { display: flex; flex-direction: column; gap: 10px; }
 .card.hello p { flex: 1; }
 .card.pay .chev { color: var(--muted); }
 .row .today { color: var(--coral-text); font-weight: 700; }
+.send-request { display: flex; flex-direction: column; gap: 10px; }
+.send-request a.btn { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; color: var(--ink); }

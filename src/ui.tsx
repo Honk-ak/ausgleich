@@ -140,7 +140,7 @@ export function isPhone(): boolean {
 }
 
 /** Sauberes Bild mit QR-Code und Zahlungsangaben, zum Hochladen in die Banking-App. */
-export async function qrImage(args: { qr: string; lines: [string, string][] }): Promise<Blob> {
+export async function qrImage(args: { qr: string; lines: [string, string][]; title?: string }): Promise<Blob> {
   const W = 900;
   const lineH = 96;
   const H = 120 + 620 + args.lines.length * lineH + 90;
@@ -153,7 +153,7 @@ export async function qrImage(args: { qr: string; lines: [string, string][] }): 
   ctx.fillStyle = '#111111';
   ctx.font = '600 44px system-ui, sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText('Überweisung', W / 2, 80);
+  ctx.fillText(args.title ?? 'Überweisung', W / 2, 80);
   const qrUrl = await QRCode.toDataURL(args.qr, { errorCorrectionLevel: 'M', margin: 2, width: 600 });
   const img = new Image();
   await new Promise<void>((resolve, reject) => {
